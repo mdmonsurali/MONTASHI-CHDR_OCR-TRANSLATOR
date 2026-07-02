@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR · Task History</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+  <nav class="topbar-nav">
+    <a href="/" class="nav-link">Single</a>
+    <a href="/batch" class="nav-link">Batch</a>
+    <a href="/translator" class="nav-link">Translator</a>
+  </nav>
+  <!-- @@PROFILE_MENU@@ -->
+</div>
+
+<h1 class="page-title">Task History</h1>
+
+<main class="admin-shell">
+  <section class="admin-section">
+    <div id="history-msg" class="admin-msg" hidden></div>
+
+    <div class="history-toolbar">
+      <span id="history-summary" class="history-summary"></span>
+    </div>
+
+    <div class="admin-table-wrap">
+      <table class="admin-table" id="history-table">
+        <thead>
+          <tr>
+            <th class="col-num">#</th>
+            <th>File</th><th>Status</th><th>Type</th><th>Pages</th>
+            <th>Elapsed</th><th>Processed</th>
+            <th>OCR Downloads</th><th>Translation</th><th></th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="10">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <nav class="pagination pagination-center" id="pagination" aria-label="Pagination"></nav>
+  </section>
+</main>
+
+<script>
+  const tableBody = document.querySelector("#history-table tbody");
+  const msg       = document.getElementById("history-msg");
+  const summary   = document.getElementById("history-summary");
+  const pager     = document.getElementById("pagination");
+
+  const PAGE_SIZE = 10;
+  let state = { page: 1, total: 0 };
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
+  }
+  function fmtDate(s) {
+    if (!s) return "";
+    try { return new Date(s).toLocaleString(); } catch { return s; }
+  }
+  function badgeClass(status) {
+    if (status === "ok")    return "badge-on";
+    if (status === "error") return "badge-off";
+    return "badge-on";
+  }
+  function downloadLinks(row) {
+    if (row.status !== "ok") return '<span class="muted">—</span>';
+    const id = encodeURIComponent(row.id);
+    const stem = (row.original_name || row.id).replace(/\.[^./\\]+$/, "");
+    return [
+      ["md",   "MD"],
+      ["docx", "DOCX"],
+      ["json", "JSON"],
+      ["source", "Source"],
+    ].map(([k, lbl]) =>
+      `<a class="link-btn" href="/documents/${id}/${k}" data-kind="${k}" data-stem="${escapeHtml(stem)}">${lbl}</a>`
+    ).join(" ");
+  }
+
+  function translationLinks(row, trans) {
+    // trans is undefined when no translation exists for this OCR doc.
+    if (row.status !== "ok") return '<span class="muted">—</span>';
+    if (!trans || !trans.translation_id) return '<span class="muted">—</span>';
+    const tid = encodeURIComponent(trans.translation_id);
+    const stem = (row.original_name || row.id).replace(/\.[^./\\]+$/, "");
+    const lang = trans.target_lang || "translated";
+    return [
+      ["translated_docx", "DOCX"],
+      ["translated_json", "JSON"],
+    ].map(([k, lbl]) =>
+      `<a class="link-btn" href="/translations/${tid}/${k}"
+          data-translated="1" data-kind="${k}" data-stem="${escapeHtml(stem)}"
+          data-lang="${escapeHtml(lang)}">${lbl}</a>`
+    ).join(" ") +
+    ` <a class="link-btn" href="/translations/${tid}/preview"
+          data-translated="1" data-kind="preview" data-stem="${escapeHtml(stem)}"
+          data-lang="${escapeHtml(lang)}" target="_blank" rel="noopener">Preview</a>`;
+  }
+
+  async function loadHistory() {
+    msg.hidden = true;
+    tableBody.innerHTML = `<tr><td colspan="10">Loading…</td></tr>`;
+    const offset = (state.page - 1) * PAGE_SIZE;
+    let resp;
+    try {
+      resp = await fetch(`/documents?limit=${PAGE_SIZE}&offset=${offset}`,
+                        { credentials: "same-origin" });
+    } catch (e) {
+      showError(`Failed to load: ${e.message}`);
+      return;
+    }
+    if (!resp.ok) { showError(`Failed to load (HTTP ${resp.status})`); return; }
+    state.total = Number(resp.headers.get("X-Total-Count") || 0);
+    const rows = await resp.json();
+
+    // For each visible OCR document, look up whether a translation exists.
+    // One bulk call so we don't issue N requests. Empty map on failure so
+    // the page still renders OCR downloads.
+    let transMap = {};
+    const okIds = rows.filter(r => r.status === "ok").map(r => r.id);
+    if (okIds.length > 0) {
+      try {
+        const tr = await fetch(`/translations-by-source`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ document_ids: okIds }),
+        });
+        if (tr.ok) transMap = await tr.json();
+      } catch (_) { /* leave map empty */ }
+    }
+
+    renderRows(rows, transMap);
+    renderSummary(rows.length);
+    renderPager();
+  }
+
+  function showError(text) {
+    msg.textContent = text;
+    msg.className = "admin-msg admin-err";
+    msg.hidden = false;
+    tableBody.innerHTML = "";
+    pager.innerHTML = "";
+    summary.textContent = "";
+  }
+
+  function renderRows(rows, transMap) {
+    transMap = transMap || {};
+    if (!rows.length) {
+      tableBody.innerHTML = `<tr><td colspan="10">No documents on this page.</td></tr>`;
+      return;
+    }
+    const startNum = (state.page - 1) * PAGE_SIZE;
+    tableBody.innerHTML = rows.map((row, i) => `
+      <tr data-id="${escapeHtml(row.id)}">
+        <td class="col-num">${startNum + i + 1}</td>
+        <td>${escapeHtml(row.original_name)}</td>
+        <td><span class="badge ${badgeClass(row.status)}">${escapeHtml(row.status)}</span></td>
+        <td>${escapeHtml(row.scan_type || "")}</td>
+        <td>${row.page_count ?? ""}</td>
+        <td>${row.elapsed_sec != null ? Number(row.elapsed_sec).toFixed(2) + "s" : ""}</td>
+        <td>${fmtDate(row.created_at)}</td>
+        <td class="actions">${downloadLinks(row)}</td>
+        <td class="actions">${translationLinks(row, transMap[row.id])}</td>
+        <td class="actions"><button class="link-btn danger" data-action="delete">Delete</button></td>
+      </tr>
+    `).join("");
+  }
+
+  function renderSummary(visible) {
+    const start = state.total === 0 ? 0 : (state.page - 1) * PAGE_SIZE + 1;
+    const end   = (state.page - 1) * PAGE_SIZE + visible;
+    summary.textContent = `${start}–${end} of ${state.total}`;
+  }
+
+  function renderPager() {
+    const pages = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
+    if (pages <= 1) { pager.innerHTML = ""; return; }
+    const cur = state.page;
+    const out = [];
+    out.push(`<button class="page-btn" data-page="${cur - 1}" ${cur === 1 ? "disabled" : ""}>‹ Prev</button>`);
+
+    // Build a window of page numbers with ellipses for large counts.
+    const windowSet = new Set([1, pages, cur - 1, cur, cur + 1]);
+    for (let i = 1; i <= pages; i++) {
+      if (i === 1 || i === pages || (i >= cur - 1 && i <= cur + 1)) windowSet.add(i);
+    }
+    const sorted = [...windowSet].filter(n => n >= 1 && n <= pages).sort((a,b)=>a-b);
+    let last = 0;
+    for (const n of sorted) {
+      if (n - last > 1) out.push(`<span class="page-ellipsis">…</span>`);
+      out.push(`<button class="page-btn ${n === cur ? "page-active" : ""}" data-page="${n}">${n}</button>`);
+      last = n;
+    }
+    out.push(`<button class="page-btn" data-page="${cur + 1}" ${cur === pages ? "disabled" : ""}>Next ›</button>`);
+    pager.innerHTML = out.join("");
+  }
+
+  pager.addEventListener("click", (e) => {
+    const b = e.target.closest("button.page-btn");
+    if (!b || b.disabled) return;
+    const p = Number(b.dataset.page);
+    if (!Number.isFinite(p) || p < 1) return;
+    state.page = p;
+    loadHistory();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+
+  // Download + delete in one delegated handler.
+  document.addEventListener("click", async (e) => {
+    const dl = e.target.closest("a.link-btn[data-kind]");
+    if (dl) {
+      const kind = dl.dataset.kind;
+      const stem = dl.dataset.stem;
+      const isTranslated = dl.dataset.translated === "1";
+
+      // Preview opens in a new tab. Pre-flight the URL so we can show a
+      // friendly message when ocr_service is mid-restart after a translate
+      // batch (LibreOffice lives there and needs ~60s to come back online).
+      // Without this the browser just shows a blank error tab on 503.
+      if (kind === "preview") {
+        e.preventDefault();
+        try {
+          const r = await fetch(dl.href, {
+            method: "GET",
+            credentials: "same-origin",
+          });
+          if (!r.ok) {
+            if (r.status === 503) {
+              await window.uiAlert({
+                title: "Preview unavailable",
+                body: "OCR service is restarting after the translate batch " +
+                      "(this takes about 60 seconds). Please try Preview again in a moment.",
+              });
+            } else if (r.status === 404) {
+              await window.uiAlert({
+                title: "Preview unavailable",
+                body: "Translated DOCX not found.",
+              });
+            } else {
+              await window.uiAlert({
+                title: "Preview failed",
+                body: `HTTP ${r.status}`,
+              });
+            }
+            return;
+          }
+          const blob = await r.blob();
+          const u = URL.createObjectURL(blob);
+          window.open(u, "_blank", "noopener");
+          setTimeout(() => URL.revokeObjectURL(u), 60000);
+        } catch (err) {
+          await window.uiAlert({ title: "Preview failed", body: err.message });
+        }
+        return;
+      }
+
+      e.preventDefault();
+      let filename;
+      if (isTranslated) {
+        // Translated outputs go as translator_ocr_<originalstem>.<ext>
+        const ext = kind === "translated_docx" ? ".docx" : ".json";
+        filename = `translator_ocr_${stem}${ext}`;
+      } else if (kind === "source") {
+        filename = `${stem}`;
+      } else {
+        const ext = kind === "md" ? ".md" : kind === "docx" ? ".docx" : ".json";
+        filename = `ocr_${stem}${ext}`;
+      }
+      try {
+        const r = await fetch(dl.href, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const blob = await r.blob();
+        const u = URL.createObjectURL(blob);
+        const t = document.createElement("a");
+        t.href = u; t.download = filename;
+        document.body.appendChild(t); t.click(); t.remove();
+        setTimeout(() => URL.revokeObjectURL(u), 1000);
+      } catch (err) {
+        await window.uiAlert({ title: "Download failed", body: err.message });
+      }
+      return;
+    }
+
+    const del = e.target.closest('button.link-btn[data-action="delete"]');
+    if (del) {
+      const tr = del.closest("tr");
+      const id = tr?.dataset.id;
+      // First two cells are # and File, so file name is td[1].
+      const name = tr?.querySelectorAll("td")?.[1]?.textContent || "this document";
+      if (!id) return;
+      const ok = await window.uiConfirm({
+        title: "Delete document?",
+        body: `Delete "${name}" permanently? This removes the original file and all generated outputs.`,
+        okLabel: "Delete",
+        danger: true,
+      });
+      if (!ok) return;
+      del.disabled = true;
+      try {
+        const r = await fetch(`/documents/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+          credentials: "same-origin",
+        });
+        if (r.status !== 204) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.detail || `HTTP ${r.status}`);
+        }
+        if (tableBody.querySelectorAll("tr").length === 1 && state.page > 1) {
+          state.page -= 1;
+        }
+        await loadHistory();
+      } catch (err) {
+        await window.uiAlert({ title: "Delete failed", body: err.message, danger: true });
+        del.disabled = false;
+      }
+    }
+  });
+
+  loadHistory();
+</script>
+</body>
+</html>

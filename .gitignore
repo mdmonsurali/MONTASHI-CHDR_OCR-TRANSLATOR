@@ -1,0 +1,12 @@
+
+# Output artifacts
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+.claude
+
+# Sample/test data
+*.pdf
+ocr_*.json

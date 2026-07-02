@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- KaTeX for rendering $$...$$ and $...$ LaTeX math in the markdown preview -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+  <nav class="topbar-nav">
+    <a href="/" class="nav-link nav-active">Single</a>
+    <a href="/batch" class="nav-link">Batch</a>
+    <a href="/translator" class="nav-link">Translator</a>
+  </nav>
+  <!-- @@PROFILE_MENU@@ -->
+</div>
+
+<div class="workspace">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Upload Document</div>
+
+      <div id="drop-zone" role="button" tabindex="0" aria-label="Upload file">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
+        <strong>Click or drag &amp; drop</strong>
+        <span>PDF · DOCX · JPG · JPEG · PNG</span>
+        <input type="file" id="file-input" accept=".pdf,.docx,.jpg,.jpeg,.png" />
+      </div>
+
+      <div id="file-name"></div>
+      <button id="run-btn" disabled>Run OCR</button>
+    </div>
+
+    <!-- Input file preview -->
+    <div class="sidebar-preview-wrap">
+      <div class="sidebar-label">Input Preview</div>
+      <div id="input-preview-container">
+        <div id="input-preview-placeholder">No file selected</div>
+        <img id="input-preview-img" alt="preview" />
+        <iframe id="input-preview-pdf" title="PDF preview"></iframe>
+        <div id="input-preview-text"></div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Main area ───────────────────────────────────────────────── -->
+  <main class="main">
+
+    <div class="main-header">
+      <h1 id="main-title">Ready</h1>
+      <p id="main-sub">Upload a file on the left and click Run OCR to start.</p>
+    </div>
+
+    <!-- Progress bar -->
+    <div id="progress-wrap">
+      <div id="progress-label">Processing…</div>
+      <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+    </div>
+
+    <!-- Log -->
+    <div id="log-box"></div>
+
+    <!-- Output columns -->
+    <div class="output-cols">
+
+      <!-- Markdown column -->
+      <div class="output-col">
+        <div class="output-col-header">
+          <span class="output-col-title">Markdown Output</span>
+          <a id="dl-txt" class="dl-btn dl-txt" href="#" download>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/>
+            </svg>
+            Download MD
+          </a>
+        </div>
+        <div class="output-preview output-markdown" id="txt-preview">
+          <div class="output-placeholder" id="txt-placeholder">Markdown preview will appear here</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- DOCX column -->
+      <div class="output-col">
+        <div class="output-col-header">
+          <span class="output-col-title">DOCX Output</span>
+          <a id="dl-docx" class="dl-btn dl-docx" href="#" download>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/>
+            </svg>
+            Download DOCX
+          </a>
+        </div>
+        <div class="output-preview" id="docx-preview">
+          <div class="output-placeholder" id="docx-placeholder">DOCX content will appear here</div>
+          <iframe id="docx-preview-iframe" title="DOCX preview"></iframe>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- JSON column -->
+      <div class="output-col">
+        <div class="output-col-header">
+          <span class="output-col-title">JSON Output</span>
+          <a id="dl-json" class="dl-btn dl-json" href="#" download>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/>
+            </svg>
+            Download JSON
+          </a>
+        </div>
+        <div class="output-preview" id="json-preview">
+          <div class="output-placeholder" id="json-placeholder">JSON output will appear here</div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <span>Made with <span class="heart">&#10084;</span> using <strong>MONTASHI-OCR-TRANSLATOR</strong></span>
+  <span class="sep">|</span>
+  <span>&copy; 2026 <strong>Md Monsur Ali</strong></span>
+  <span class="sep">|</span>
+  <a href="https://www.linkedin.com/in/mdmonsurali/" target="_blank" rel="noopener">LinkedIn</a>
+  <span class="sep">·</span>
+  <a href="https://inventaai.com/" target="_blank" rel="noopener">Blog</a>
+  <span class="sep">·</span>
+  <a href="https://www.linkedin.com/company/inventaai/" target="_blank" rel="noopener">InventaAI</a>
+  <span class="sep">·</span>
+  <a href="https://medium.com/@monsuralirana/" target="_blank" rel="noopener">Medium</a>
+  <span class="sep">·</span>
+  <a href="https://github.com/mdmonsurali" target="_blank" rel="noopener">GitHub</a>
+</footer>
+
+<script>
+  const dropZone        = document.getElementById('drop-zone');
+  const fileInput       = document.getElementById('file-input');
+  const fileNameEl      = document.getElementById('file-name');
+  const runBtn          = document.getElementById('run-btn');
+  const logBox          = document.getElementById('log-box');
+  const progressWrap    = document.getElementById('progress-wrap');
+  const progressBar     = document.getElementById('progress-bar');
+  const progressLabel   = document.getElementById('progress-label');
+  const mainTitle       = document.getElementById('main-title');
+  const mainSub         = document.getElementById('main-sub');
+  const dlTxt           = document.getElementById('dl-txt');
+  const dlDocx          = document.getElementById('dl-docx');
+  const dlJson          = document.getElementById('dl-json');
+  const txtPreview      = document.getElementById('txt-preview');
+  const txtPlaceholder  = document.getElementById('txt-placeholder');
+  const docxPreview     = document.getElementById('docx-preview');
+  const docxPlaceholder = document.getElementById('docx-placeholder');
+  const docxIframe      = document.getElementById('docx-preview-iframe');
+  const jsonPreview     = document.getElementById('json-preview');
+  const jsonPlaceholder = document.getElementById('json-placeholder');
+
+  const inputContainer   = document.getElementById('input-preview-container');
+  const inputPlaceholder = document.getElementById('input-preview-placeholder');
+  const inputImg         = document.getElementById('input-preview-img');
+  const inputPdf         = document.getElementById('input-preview-pdf');
+  const inputText        = document.getElementById('input-preview-text');
+
+  let selectedFile = null;
+
+  // ── Drop zone ──────────────────────────────────────────────────────────────
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+
+  function setFile(f) {
+    selectedFile = f;
+    fileNameEl.textContent = f.name;
+    runBtn.disabled = false;
+    resetOutputs();
+    mainTitle.textContent = f.name;
+    mainSub.textContent = 'Click Run OCR to process this file.';
+    showInputPreview(f);
+  }
+
+  async function showInputPreview(f) {
+    const ext = f.name.split('.').pop().toLowerCase();
+
+    inputPlaceholder.style.display = 'none';
+    inputImg.style.display  = 'none';
+    inputPdf.style.display  = 'none';
+    inputText.style.display = 'none';
+
+    if (['jpg','jpeg','png'].includes(ext)) {
+      inputImg.src = URL.createObjectURL(f);
+      inputImg.style.display = 'block';
+    } else if (ext === 'pdf') {
+      inputPdf.src = URL.createObjectURL(f);
+      inputPdf.style.display = 'block';
+    } else if (ext === 'txt') {
+      // Plain text: read locally and show as-is.
+      try {
+        const text = await f.text();
+        const shown = text.length > 12000 ? text.slice(0, 12000) + '\n\n[… truncated …]' : text;
+        inputText.textContent = shown;
+        inputText.style.display = 'block';
+      } catch (err) {
+        inputText.textContent = `Unable to read text file: ${err.message}`;
+        inputText.style.display = 'block';
+      }
+    } else if (ext === 'docx') {
+      // Browsers can't render DOCX. Ask the server to convert it to PDF and
+      // show that instead.
+      inputText.textContent = 'Generating preview…';
+      inputText.style.display = 'block';
+      try {
+        const form = new FormData();
+        form.append('file', f);
+        const resp = await fetch('/preview-input', { method: 'POST', body: form });
+        if (!resp.ok) throw new Error(`preview ${resp.status}`);
+        const blob = await resp.blob();
+        inputText.style.display = 'none';
+        inputPdf.src = URL.createObjectURL(blob);
+        inputPdf.style.display = 'block';
+      } catch (err) {
+        inputText.textContent =
+          `File: ${f.name}\nType: DOCX document\nSize: ${(f.size/1024).toFixed(1)} KB\n\n` +
+          `Preview unavailable (${err.message}). Run OCR to extract the content.`;
+      }
+    }
+  }
+
+  // ── Run OCR ────────────────────────────────────────────────────────────────
+  runBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    runBtn.disabled = true;
+    resetOutputs();
+
+    progressWrap.style.display = 'block';
+    progressBar.classList.add('running');
+    progressBar.style.width = '5%';
+    progressLabel.textContent = 'Uploading…';
+
+    logBox.innerHTML = '';
+    logBox.style.display = 'block';
+
+    mainTitle.textContent = 'Processing…';
+    mainSub.textContent = selectedFile.name;
+
+    appendLog('inf', `Uploading ${selectedFile.name} …`);
+
+    const form = new FormData();
+    form.append('file', selectedFile);
+
+    try {
+      progressBar.style.width = '20%';
+      progressLabel.textContent = 'Running OCR…';
+
+      const resp = await fetch('/ocr', { method: 'POST', body: form });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(err.detail || resp.statusText);
+      }
+
+      progressBar.style.width = '80%';
+      progressLabel.textContent = 'Generating output files…';
+      appendLog('inf', 'OCR complete. Fetching output…');
+
+      const data = await resp.json();
+      const docId = data.document_id;
+      const docUrl = (kind) => `/documents/${encodeURIComponent(docId)}/${kind}`;
+
+      // Markdown preview — fetch raw .md, render to HTML via marked.js.
+      const mdResp = await fetch(docUrl('md'));
+      let mdContent = await mdResp.text();
+      if (mdContent.length > 60000) mdContent = mdContent.slice(0, 60000) + '\n\n[… truncated …]';
+      // Picture URLs in the stored markdown are relative (images/<filename>)
+      // so they resolve against the markdown's own folder when downloaded.
+      // For the in-page preview, rewrite to an absolute proxy URL so the
+      // browser doesn't resolve them against the current page origin path.
+      const imageBase = `/documents/${encodeURIComponent(docId)}/images/`;
+      mdContent = mdContent.replace(
+        /(!\[[^\]]*\]\()images\/([^)\s]+)(\))/g,
+        (_m, pre, fname, post) => pre + imageBase + fname + post,
+      );
+      // Pre-render LaTeX math BEFORE handing the text to marked, because
+      // marked treats `\frac{...}` as escape sequences and corrupts the
+      // braces/backslashes before KaTeX ever sees the source.
+      // Strategy: replace each $$...$$ and $...$ block with rendered HTML
+      // wrapped in a sentinel placeholder, then put it back after marked.parse().
+      const mathHtml = [];
+      const mathToken = (i) => `@@MATH_PLACEHOLDER_${i}@@`;
+      const renderMath = (tex, displayMode) => {
+        if (!window.katex) return null;
+        try {
+          return window.katex.renderToString(tex, {
+            displayMode,
+            throwOnError: false,
+            output: 'html',
+          });
+        } catch (_e) {
+          return null;
+        }
+      };
+      // Block math first ($$...$$), so the inline $...$ pass doesn't eat them.
+      mdContent = mdContent.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex) => {
+        const html = renderMath(tex.trim(), true);
+        if (html == null) return _m;
+        mathHtml.push(html);
+        return '\n\n' + mathToken(mathHtml.length - 1) + '\n\n';
+      });
+      // Then inline math ($...$) — single-line, not preceded by another $.
+      mdContent = mdContent.replace(
+        /(^|[^\\$])\$([^\n$]+?)\$/g,
+        (_m, pre, tex) => {
+          const html = renderMath(tex, false);
+          if (html == null) return _m;
+          mathHtml.push(html);
+          return pre + mathToken(mathHtml.length - 1);
+        },
+      );
+
+      txtPlaceholder.style.display = 'none';
+      const mdHost = document.createElement('div');
+      mdHost.className = 'markdown-body';
+      let rendered = marked.parse(mdContent);
+      // Swap placeholders back to the KaTeX-rendered HTML.
+      rendered = rendered.replace(/@@MATH_PLACEHOLDER_(\d+)@@/g,
+        (_m, i) => mathHtml[Number(i)] || '');
+      mdHost.innerHTML = rendered;
+      txtPreview.replaceChildren(txtPlaceholder, mdHost);
+
+      // DOCX preview via server-side PDF conversion (by document id).
+      docxPlaceholder.style.display = 'none';
+      docxIframe.src = `/preview/${encodeURIComponent(docId)}`;
+      docxIframe.style.display = 'block';
+
+      // JSON preview — pretty-print inline.
+      const jsonResp = await fetch(docUrl('json'));
+      if (jsonResp.ok) {
+        const jsonObj = await jsonResp.json();
+        let jsonStr = JSON.stringify(jsonObj, null, 2);
+        if (jsonStr.length > 60000) jsonStr = jsonStr.slice(0, 60000) + '\n\n[… truncated …]';
+        jsonPlaceholder.style.display = 'none';
+        jsonPreview.replaceChildren(jsonPlaceholder, document.createTextNode(jsonStr));
+      }
+
+      // Download buttons — mirror the batch UI: fetch the artifact as a blob
+      // and trigger a save under `ocr_<original>.<ext>`, so the server's
+      // inline Content-Disposition for md/json is bypassed.
+      const origStem = (data.original_name || docId).replace(/\.[^./\\]+$/, '');
+      attachDownload(dlTxt,  docUrl('md'),   `ocr_${origStem}.md`);
+      attachDownload(dlDocx, docUrl('docx'), `ocr_${origStem}.docx`);
+      attachDownload(dlJson, docUrl('json'), `ocr_${origStem}.json`);
+
+      progressBar.style.width = '100%';
+      progressBar.classList.remove('running');
+      progressLabel.textContent = 'Done!';
+      const niceName = data.original_name || docId;
+      appendLog('ok', `Done!  ${niceName}  (${data.page_count} page${data.page_count === 1 ? '' : 's'}, ${data.elapsed_sec}s)`);
+
+      mainTitle.textContent = 'OCR Complete';
+      mainSub.textContent = `${niceName} · ${data.page_count} page${data.page_count === 1 ? '' : 's'} · ${data.elapsed_sec}s`;
+
+    } catch (err) {
+      appendLog('err', 'ERROR: ' + err.message);
+      progressBar.classList.remove('running');
+      progressBar.style.width = '0%';
+      mainTitle.textContent = 'Error';
+      mainSub.textContent = err.message;
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+
+  // Wire a download anchor to fetch its target as a blob and save under
+  // `filename`, matching the batch UI's makeDl. The anchor's onclick is
+  // replaced (not added) so successive OCR runs don't stack handlers.
+  function attachDownload(anchor, url, filename) {
+    anchor.href = url;
+    anchor.setAttribute('download', filename);
+    anchor.classList.add('active');
+    anchor.onclick = async (e) => {
+      e.preventDefault();
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const objUrl = URL.createObjectURL(blob);
+        const tmp = document.createElement('a');
+        tmp.href = objUrl;
+        tmp.download = filename;
+        document.body.appendChild(tmp);
+        tmp.click();
+        tmp.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+      } catch (err) {
+        appendLog('err', `Download failed (${filename}): ${err.message}`);
+      }
+    };
+  }
+
+  function clearDownload(anchor) {
+    anchor.classList.remove('active');
+    anchor.href = '#';
+    anchor.removeAttribute('download');
+    anchor.onclick = null;
+  }
+
+  function resetOutputs() {
+    txtPreview.replaceChildren(txtPlaceholder);
+    txtPlaceholder.style.display = '';
+
+    docxIframe.style.display = 'none';
+    docxIframe.src = '';
+    docxPreview.replaceChildren(docxPlaceholder, docxIframe);
+    docxPlaceholder.style.display = '';
+
+    jsonPreview.replaceChildren(jsonPlaceholder);
+    jsonPlaceholder.style.display = '';
+
+    clearDownload(dlTxt);
+    clearDownload(dlDocx);
+    clearDownload(dlJson);
+
+    progressWrap.style.display = 'none';
+    progressBar.style.width = '0%';
+    progressBar.classList.remove('running');
+    logBox.style.display = 'none';
+    logBox.innerHTML = '';
+  }
+
+  function appendLog(cls, msg) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = msg + '\n';
+    logBox.appendChild(span);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR — Translator</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+  <style>
+    .mode-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 3px 10px;
+      border-radius: 999px; background: #f1f5f9; color: #475569;
+      border: 1px solid #cbd5e1;
+    }
+    .mode-pill .dot { width:8px; height:8px; border-radius:50%; background:#94a3b8; }
+    .mode-pill.ocr  { background:#ecfdf5; color:#065f46; border-color:#a7f3d0; }
+    .mode-pill.ocr  .dot { background:#10b981; }
+    .mode-pill.tr   { background:#eff6ff; color:#1e40af; border-color:#bfdbfe; }
+    .mode-pill.tr   .dot { background:#3b82f6; }
+    .mode-pill.busy { background:#fef3c7; color:#92400e; border-color:#fde68a; }
+    .mode-pill.busy .dot { background:#f59e0b; animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .stage-badge {
+      display:inline-block; font-size:10px; font-weight:600;
+      padding:2px 8px; border-radius:4px; margin-right:6px;
+      text-transform:uppercase; letter-spacing:0.04em;
+    }
+    .stage-badge.ocr  { background:#d1fae5; color:#065f46; }
+    .stage-badge.tr   { background:#dbeafe; color:#1e40af; }
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+  <nav class="topbar-nav">
+    <a href="/" class="nav-link">Single</a>
+    <a href="/batch" class="nav-link">Batch</a>
+    <a href="/translator" class="nav-link nav-active">Translator</a>
+  </nav>
+  <!-- @@PROFILE_MENU@@ -->
+</div>
+
+<div class="workspace">
+
+  <aside class="sidebar">
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Target language</div>
+      <select id="lang-select" style="width:100%;padding:8px;border-radius:6px;border:1px solid #d0d5dd;">
+        <option value="English (en)" selected>English</option>
+        <option value="pt-BR">Brazilian Portuguese (pt-BR)</option>
+        <option value="German (de)">German</option>
+        <option value="Bengali (bn)">Bangla (Bengali)</option>
+        <option value="Hindi (hi)">Hindi</option>
+        <option value="French (fr)">French</option>
+        <option value="Spanish (es)">Spanish</option>
+        <option value="Polish (pl)">Polish</option>
+        <option value="Japanese (ja)">Japanese</option>
+        <option value="Italian (it)">Italian</option>
+        <option value="Korean (ko)">Korean</option>
+        <option value="Chinese Simplified (zh-Hans)">Chinese (Simplified)</option>
+      </select>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Upload Documents</div>
+
+      <div id="drop-zone" role="button" tabindex="0" aria-label="Upload files">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
+        <strong>Click or drag &amp; drop</strong>
+        <span>PDF · DOCX · JPG · JPEG · PNG (multi-select)</span>
+        <input type="file" id="file-input" accept=".pdf,.docx,.jpg,.jpeg,.png" multiple />
+      </div>
+
+      <div id="file-name"></div>
+      <button id="run-btn" disabled>OCR + Translate</button>
+
+      <div class="batch-file-list" id="file-list"></div>
+    </div>
+
+  </aside>
+
+  <main class="main">
+
+    <div class="main-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <h1 id="main-title" style="margin-right:auto;">Ready</h1>
+      <span id="mode-pill" class="mode-pill"><span class="dot"></span><span id="mode-text">checking…</span></span>
+    </div>
+    <p id="main-sub">
+      Each uploaded file is OCR'd, then the GPU swaps to translation mode and
+      every document is translated to the target language. Results land in
+      Task History with downloadable DOCX, JSON, and preview.
+    </p>
+
+    <div id="progress-wrap">
+      <div id="progress-label">Processing…</div>
+      <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+    </div>
+
+    <div id="log-box"></div>
+
+    <div class="batch-results-wrap" id="results-wrap" style="display:none;">
+      <div class="batch-results-toolbar">
+        <span class="title">Translation Results</span>
+        <button id="zip-btn" class="zip-btn" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/>
+          </svg>
+          Download all as ZIP
+        </button>
+      </div>
+      <div class="batch-results-table" id="results-table"></div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="preview-modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title" id="preview-title">Translated DOCX Preview</span>
+      <button class="modal-close" id="preview-close" type="button" aria-label="Close">×</button>
+    </div>
+    <iframe id="preview-iframe" class="modal-iframe" title="DOCX preview"></iframe>
+  </div>
+</div>
+
+<footer class="footer">
+  <span>Made with <span class="heart">&#10084;</span> using <strong>MONTASHI-OCR-TRANSLATOR</strong></span>
+  <span class="sep">|</span>
+  <span>&copy; 2026 <strong>Md Monsur Ali</strong></span>
+  <span class="sep">|</span>
+  <a href="https://www.linkedin.com/in/mdmonsurali/" target="_blank" rel="noopener">LinkedIn</a>
+  <span class="sep">·</span>
+  <a href="https://inventaai.com/" target="_blank" rel="noopener">Blog</a>
+  <span class="sep">·</span>
+  <a href="https://www.linkedin.com/company/inventaai/" target="_blank" rel="noopener">InventaAI</a>
+  <span class="sep">·</span>
+  <a href="https://medium.com/@monsuralirana/" target="_blank" rel="noopener">Medium</a>
+  <span class="sep">·</span>
+  <a href="https://github.com/mdmonsurali" target="_blank" rel="noopener">GitHub</a>
+</footer>
+
+<script>
+  const SUPPORTED = new Set(['pdf','docx','jpg','jpeg','png']);
+
+  const dropZone     = document.getElementById('drop-zone');
+  const fileInput    = document.getElementById('file-input');
+  const fileNameEl   = document.getElementById('file-name');
+  const fileListEl   = document.getElementById('file-list');
+  const runBtn       = document.getElementById('run-btn');
+  const zipBtn       = document.getElementById('zip-btn');
+  const langSel      = document.getElementById('lang-select');
+  const logBox       = document.getElementById('log-box');
+  const progressWrap = document.getElementById('progress-wrap');
+  const progressBar  = document.getElementById('progress-bar');
+  const progressLabel= document.getElementById('progress-label');
+  const mainTitle    = document.getElementById('main-title');
+  const mainSub      = document.getElementById('main-sub');
+  const resultsTable = document.getElementById('results-table');
+  const resultsWrap  = document.getElementById('results-wrap');
+  const modePill     = document.getElementById('mode-pill');
+  const modeText     = document.getElementById('mode-text');
+
+  const modal        = document.getElementById('preview-modal');
+  const modalIframe  = document.getElementById('preview-iframe');
+  const modalTitle   = document.getElementById('preview-title');
+  const modalClose   = document.getElementById('preview-close');
+
+  let selectedFiles = [];
+  let successfulTranslationIds = [];
+
+  // Extract a short locale code for filenames from a target_lang string:
+  //   "English (en)"               -> "en"
+  //   "Chinese Simplified (zh-Hans)" -> "zh-Hans"
+  //   "pt-BR"                      -> "pt-BR"
+  //   ""/null                      -> "xx"
+  function langCode(s) {
+    if (!s) return 'xx';
+    const m = String(s).match(/\(([^)]+)\)\s*$/);
+    const raw = (m ? m[1] : String(s)).trim();
+    return raw.replace(/[^A-Za-z0-9_-]/g, '') || 'xx';
+  }
+  // Per-file state: index -> {ocrStatus, translateStatus, original_name,
+  //                            document_id, translation_id, ocr_elapsed,
+  //                            translate_elapsed, error}
+  const fileState = new Map();
+
+  // ── Drop zone ──────────────────────────────────────────────────────────
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files && e.dataTransfer.files.length) {
+      addFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files.length) {
+      addFiles(Array.from(fileInput.files));
+      fileInput.value = '';
+    }
+  });
+
+  function addFiles(files) {
+    for (const f of files) {
+      const ext = f.name.split('.').pop().toLowerCase();
+      if (!SUPPORTED.has(ext)) continue;
+      if (selectedFiles.some(x => x.name === f.name && x.size === f.size)) continue;
+      selectedFiles.push(f);
+    }
+    renderFileList();
+  }
+  function removeFile(idx) { selectedFiles.splice(idx, 1); renderFileList(); }
+  function renderFileList() {
+    fileListEl.innerHTML = '';
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const f = selectedFiles[i];
+      const row = document.createElement('div');
+      row.className = 'batch-file-item';
+      const label = document.createElement('span');
+      label.textContent = `${f.name}  (${(f.size/1024).toFixed(1)} KB)`;
+      const btn = document.createElement('button');
+      btn.className = 'rm'; btn.type = 'button'; btn.textContent = '×';
+      btn.title = 'Remove';
+      btn.addEventListener('click', () => removeFile(i));
+      row.appendChild(label); row.appendChild(btn);
+      fileListEl.appendChild(row);
+    }
+    const n = selectedFiles.length;
+    fileNameEl.textContent = n === 0 ? '' : `${n} file${n === 1 ? '' : 's'} selected`;
+    runBtn.disabled = n === 0;
+  }
+
+  // ── Mode indicator polling ─────────────────────────────────────────────
+  async function refreshMode() {
+    try {
+      const r = await fetch('/translator/status');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const s = await r.json();
+      let label = '', cls = 'mode-pill';
+      if (s.batch_in_flight || s.current_phase !== 'idle') {
+        label = `Working · ${s.current_phase}`; cls += ' busy';
+      } else if (s.ocr.running && s.translator.running) {
+        label = 'OCR + Translator online'; cls += ' ocr';
+      } else if (s.ocr.running) {
+        label = 'OCR online'; cls += ' ocr';
+      } else if (s.translator.running) {
+        label = 'Translator online'; cls += ' tr';
+      } else {
+        label = 'All services offline';
+      }
+      modePill.className = cls;
+      modeText.textContent = label;
+    } catch (e) {
+      modePill.className = 'mode-pill';
+      modeText.textContent = 'status unavailable';
+    }
+  }
+  refreshMode();
+  setInterval(refreshMode, 7000);
+
+  // ── Run pipeline ───────────────────────────────────────────────────────
+  runBtn.addEventListener('click', async () => {
+    if (selectedFiles.length === 0) return;
+    runBtn.disabled = true;
+    zipBtn.disabled = true;
+    successfulTranslationIds = [];
+    fileState.clear();
+    resultsWrap.style.display = 'none';
+    resultsTable.innerHTML = '';
+
+    progressWrap.style.display = 'block';
+    progressBar.classList.add('running');
+    progressBar.style.width = '5%';
+    progressLabel.textContent = 'Uploading…';
+
+    logBox.innerHTML = '';
+    logBox.style.display = 'block';
+
+    mainTitle.textContent = 'Processing…';
+    mainSub.textContent = `${selectedFiles.length} file(s) · OCR → swap GPU → translate`;
+    appendLog('inf', `Uploading ${selectedFiles.length} file(s)…`);
+
+    const form = new FormData();
+    for (const f of selectedFiles) form.append('files', f);
+    form.append('target_lang', langSel.value || 'English (en)');
+
+    // total of "phases" we count toward the progress bar = N OCR + N translate
+    let totalFiles = selectedFiles.length;
+    let stepsDone = 0;
+    const totalSteps = totalFiles * 2;
+
+    function bump(label) {
+      stepsDone += 1;
+      const pct = Math.min(100, Math.round((stepsDone / totalSteps) * 100));
+      progressBar.style.width = `${pct}%`;
+      if (label) progressLabel.textContent = label;
+    }
+
+    try {
+      const resp = await fetch('/translator/run', { method: 'POST', body: form });
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => resp.statusText);
+        throw new Error(err || resp.statusText);
+      }
+      resultsWrap.style.display = 'flex';
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          let eventName = 'message';
+          const dataLines = [];
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+          }
+          if (dataLines.length === 0) continue;
+
+          let payload;
+          try { payload = JSON.parse(dataLines.join('\n')); }
+          catch (e) { appendLog('err', 'Bad SSE payload: ' + e.message); continue; }
+
+          if (eventName === 'start') {
+            totalFiles = payload.total || 0;
+            renderInitialCards(payload.items || []);
+            appendLog('inf', `Queued ${totalFiles} file(s). Target: ${payload.target_lang || langSel.value || 'English (en)'}.`);
+          } else if (eventName === 'status') {
+            const msg = payload.message || payload.phase || 'status';
+            appendLog('inf', `[${payload.phase || 'status'}] ${msg}`);
+            progressLabel.textContent = msg;
+          } else if (eventName === 'result') {
+            applyResult(payload);
+            bump(`Stage ${payload.stage}: ${payload.original_name}`);
+            zipBtn.disabled = successfulTranslationIds.length === 0;
+          } else if (eventName === 'end') {
+            progressBar.style.width = '100%';
+            progressBar.classList.remove('running');
+            progressLabel.textContent = `Done · ${payload.ok_ocr || 0} OCR, ${successfulTranslationIds.length} translated`;
+            mainTitle.textContent = 'Pipeline Complete';
+            appendLog('ok',
+              `Done. ${payload.ok_ocr || 0}/${payload.total || 0} OCR, ` +
+              `${successfulTranslationIds.length}/${payload.total || 0} translated in ` +
+              `${payload.total_elapsed_sec}s.`);
+            refreshMode();
+          } else if (eventName === 'error') {
+            throw new Error(payload.detail || 'Orchestrator error');
+          }
+        }
+      }
+    } catch (err) {
+      appendLog('err', 'ERROR: ' + err.message);
+      progressBar.classList.remove('running');
+      progressBar.style.width = '0%';
+      mainTitle.textContent = 'Error';
+      mainSub.textContent = err.message;
+    } finally {
+      runBtn.disabled = selectedFiles.length === 0;
+    }
+  });
+
+  // Initial placeholder card per file (created from `start` event).
+  function renderInitialCards(items) {
+    resultsTable.innerHTML = '';
+    for (const it of items) {
+      fileState.set(it.index, {
+        original_name: it.original_name,
+        ocrStatus: 'pending',
+        translateStatus: 'pending',
+      });
+      const card = document.createElement('div');
+      card.className = 'batch-card';
+      card.dataset.index = String(it.index);
+      const meta = document.createElement('div');
+      meta.className = 'batch-meta';
+      const name = document.createElement('div');
+      name.className = 'batch-fname';
+      const nameLine = document.createElement('span');
+      nameLine.textContent = it.original_name || '(unknown)';
+      name.appendChild(nameLine);
+      meta.appendChild(name);
+      const status = document.createElement('div');
+      status.className = 'batch-status pending';
+      status.innerHTML = '<span class="stage-badge ocr">OCR</span> Queued';
+      meta.appendChild(status);
+      card.appendChild(meta);
+      const actions = document.createElement('div');
+      actions.className = 'batch-actions';
+      card.appendChild(actions);
+      resultsTable.appendChild(card);
+    }
+  }
+
+  function applyResult(r) {
+    const card = resultsTable.querySelector(`.batch-card[data-index="${r.index}"]`);
+    if (!card) return;
+    const state = fileState.get(r.index) || {};
+    if (r.stage === 'ocr') {
+      state.ocrStatus = r.status;
+      state.document_id = r.document_id;
+      state.ocr_elapsed = r.elapsed_sec;
+      if (r.status === 'error') state.error = r.error;
+    } else if (r.stage === 'translate') {
+      state.translateStatus = r.status;
+      state.translation_id = r.translation_id;
+      state.translate_elapsed = r.elapsed_sec;
+      state.target_lang = r.target_lang || state.target_lang;
+      if (r.status === 'error') state.error = r.error;
+      if (r.status === 'ok' && r.translation_id) {
+        successfulTranslationIds.push(r.translation_id);
+      }
+    }
+    fileState.set(r.index, state);
+    rerenderCard(r.index, state);
+  }
+
+  function rerenderCard(index, state) {
+    const card = resultsTable.querySelector(`.batch-card[data-index="${index}"]`);
+    if (!card) return;
+    const status = card.querySelector('.batch-status');
+    const actions = card.querySelector('.batch-actions');
+    actions.innerHTML = '';
+
+    // Status text reflects the latest stage completed.
+    let html = '';
+    let cls = 'batch-status';
+    if (state.translateStatus === 'ok') {
+      cls += ' ok';
+      html = `<span class="stage-badge tr">DONE</span> Translated · ${state.translate_elapsed || 0}s`;
+    } else if (state.translateStatus === 'error') {
+      cls += ' error';
+      html = `<span class="stage-badge tr">FAIL</span> Translate failed`;
+    } else if (state.ocrStatus === 'ok') {
+      cls += ' running';
+      html = `<span class="stage-badge ocr">OK</span> OCR done · ${state.ocr_elapsed || 0}s · awaiting translate`;
+    } else if (state.ocrStatus === 'error') {
+      cls += ' error';
+      html = `<span class="stage-badge ocr">FAIL</span> OCR failed`;
+    } else {
+      cls += ' pending';
+      html = `<span class="stage-badge ocr">OCR</span> Queued`;
+    }
+    status.className = cls;
+    status.innerHTML = html;
+    if (state.error) status.title = state.error;
+
+    // Error banner on the filename row when something failed.
+    const fname = card.querySelector('.batch-fname');
+    if (fname) {
+      const existing = fname.querySelector('.batch-err');
+      if (existing) existing.remove();
+      if (state.error) {
+        const err = document.createElement('span');
+        err.className = 'batch-err';
+        err.textContent = state.error;
+        fname.appendChild(err);
+      }
+    }
+
+    // Buttons appear once translation succeeds.
+    if (state.translateStatus === 'ok' && state.translation_id) {
+      actions.appendChild(makeDl(state, 'translated_docx', 'dl-docx', 'Download DOCX'));
+      actions.appendChild(makeDl(state, 'translated_json', 'dl-json', 'Download JSON'));
+      actions.appendChild(makePreviewBtn(state));
+    }
+  }
+
+  function makeDl(state, kind, cls, label) {
+    const a = document.createElement('a');
+    a.className = 'dl-btn ' + cls + ' active';
+    a.textContent = label;
+    const url = `/translations/${encodeURIComponent(state.translation_id)}/${kind}`;
+    a.href = url;
+    const ext = { translated_docx: 'docx', translated_json: 'json' }[kind] || 'bin';
+    const stem = (state.original_name || 'output').replace(/\.[^./\\]+$/, '');
+    const langTag = langCode(state.target_lang || langSel.value);
+    const filename = `translator_${langTag}_ocr_${stem}.${ext}`;
+    a.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const objUrl = URL.createObjectURL(blob);
+        const tmp = document.createElement('a');
+        tmp.href = objUrl; tmp.download = filename;
+        document.body.appendChild(tmp); tmp.click(); tmp.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+      } catch (err) {
+        appendLog('err', `Download failed (${filename}): ${err.message}`);
+      }
+    });
+    return a;
+  }
+
+  function makePreviewBtn(state) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dl-btn dl-preview active';
+    b.textContent = 'Preview DOCX';
+    b.addEventListener('click', () => openPreview(state.translation_id, state.original_name, state.target_lang));
+    return b;
+  }
+
+  async function openPreview(transId, displayName, targetLang) {
+    const lang = targetLang || langSel.value || 'English (en)';
+    modalTitle.textContent = displayName ? `${displayName} — ${lang}` : transId;
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+
+    // Pre-flight the preview URL so we can surface a friendly message when
+    // ocr_service is still warming up after the GPU swap-back (it runs
+    // LibreOffice and needs ~60s to come fully online). Without this the
+    // iframe just shows a blank page on 503 / 500.
+    const previewUrl = `/translations/${encodeURIComponent(transId)}/preview`;
+    showPreviewMessage('Loading preview…');
+    try {
+      const resp = await fetch(previewUrl, { credentials: 'same-origin' });
+      if (!resp.ok) {
+        if (resp.status === 503) {
+          showPreviewMessage(
+            'Preview is temporarily unavailable. OCR service is restarting ' +
+            'after the translate batch (this takes about 60 seconds). ' +
+            'Please close this and click Preview again in a moment.'
+          );
+        } else if (resp.status === 404) {
+          showPreviewMessage('Translated DOCX not found.');
+        } else {
+          showPreviewMessage(`Preview failed (HTTP ${resp.status}).`);
+        }
+        return;
+      }
+      const blob = await resp.blob();
+      const objUrl = URL.createObjectURL(blob);
+      modalIframe.src = objUrl;
+      modalIframe.style.display = '';
+      // Free the object URL when the modal closes; tracked via dataset so
+      // closePreview can revoke it.
+      modalIframe.dataset.objUrl = objUrl;
+    } catch (err) {
+      showPreviewMessage(`Preview failed: ${err.message}`);
+    }
+  }
+
+  function showPreviewMessage(text) {
+    modalIframe.style.display = 'none';
+    let banner = modal.querySelector('.preview-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = 'preview-banner';
+      banner.style.cssText =
+        'padding:24px 28px;font-size:14px;line-height:1.55;color:#475569;' +
+        'background:#f8fafc;border-bottom:1px solid #e2e8f0;';
+      modalIframe.parentNode.insertBefore(banner, modalIframe);
+    }
+    banner.textContent = text;
+    banner.style.display = '';
+  }
+
+  function clearPreviewMessage() {
+    const banner = modal.querySelector('.preview-banner');
+    if (banner) banner.style.display = 'none';
+  }
+  function closePreview() {
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+    const objUrl = modalIframe.dataset.objUrl;
+    if (objUrl) {
+      URL.revokeObjectURL(objUrl);
+      delete modalIframe.dataset.objUrl;
+    }
+    modalIframe.src = '';
+    clearPreviewMessage();
+  }
+  modalClose.addEventListener('click', closePreview);
+  modal.addEventListener('click', e => { if (e.target === modal) closePreview(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && modal.classList.contains('open')) closePreview();
+  });
+
+  zipBtn.addEventListener('click', async () => {
+    if (successfulTranslationIds.length === 0) return;
+    zipBtn.disabled = true;
+    const original = zipBtn.innerHTML;
+    zipBtn.textContent = 'Building ZIP…';
+    try {
+      const resp = await fetch('/translator/batch-zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: successfulTranslationIds }),
+      });
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => resp.statusText);
+        throw new Error(err || resp.statusText);
+      }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = 'Translate_result.zip';
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      appendLog('ok', `ZIP downloaded (${successfulTranslationIds.length} document(s)).`);
+    } catch (err) {
+      appendLog('err', 'ZIP failed: ' + err.message);
+    } finally {
+      zipBtn.innerHTML = original;
+      zipBtn.disabled = false;
+    }
+  });
+
+  function appendLog(cls, msg) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = msg + '\n';
+    logBox.appendChild(span);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+</script>
+</body>
+</html>

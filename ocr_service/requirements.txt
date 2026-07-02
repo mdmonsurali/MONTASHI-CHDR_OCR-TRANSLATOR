@@ -1,0 +1,23 @@
+# Helper script dependencies on top of vllm/vllm-openai:unlimited-ocr base image
+# (transformers, accelerate, huggingface_hub already provided by the base; the
+# baidu/Unlimited-OCR weights are baked into the image, so no HF download here.)
+
+# FastAPI app
+fastapi==0.136.3
+uvicorn[standard]==0.37.0
+python-multipart==0.0.20
+
+# vLLM client
+openai==2.1.0
+
+# Document & image processing
+pillow==11.3.0
+PyMuPDF==1.27.2.3
+python-docx==1.2.0
+
+# Formula rendering
+matplotlib==3.10.9
+
+# Storage layer
+asyncpg==0.31.0
+minio==7.2.20

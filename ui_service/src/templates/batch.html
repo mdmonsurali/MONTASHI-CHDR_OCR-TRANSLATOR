@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR — Batch</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+  <nav class="topbar-nav">
+    <a href="/" class="nav-link">Single</a>
+    <a href="/batch" class="nav-link nav-active">Batch</a>
+    <a href="/translator" class="nav-link">Translator</a>
+  </nav>
+  <!-- @@PROFILE_MENU@@ -->
+</div>
+
+<div class="workspace">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Upload Documents</div>
+
+      <div id="drop-zone" role="button" tabindex="0" aria-label="Upload files">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
+        <strong>Click or drag &amp; drop</strong>
+        <span>PDF · DOCX · JPG · JPEG · PNG (multi-select)</span>
+        <input type="file" id="file-input" accept=".pdf,.docx,.jpg,.jpeg,.png" multiple />
+      </div>
+
+      <div id="file-name"></div>
+      <button id="run-btn" disabled>Run OCR (Batch)</button>
+
+      <div class="batch-file-list" id="file-list"></div>
+    </div>
+
+  </aside>
+
+  <!-- ── Main area ───────────────────────────────────────────────── -->
+  <main class="main">
+
+    <div class="main-header">
+      <h1 id="main-title">Ready</h1>
+      <p id="main-sub">Select one or more files on the left and click Run OCR (Batch).</p>
+    </div>
+
+    <!-- Progress bar -->
+    <div id="progress-wrap">
+      <div id="progress-label">Processing…</div>
+      <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+    </div>
+
+    <!-- Log -->
+    <div id="log-box"></div>
+
+    <!-- Results (hidden until a batch run completes) -->
+    <div class="batch-results-wrap" id="results-wrap" style="display:none;">
+      <div class="batch-results-toolbar">
+        <span class="title">Batch Results</span>
+        <button id="zip-btn" class="zip-btn" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/>
+          </svg>
+          Download all as ZIP
+        </button>
+      </div>
+
+      <div class="batch-results-table" id="results-table"></div>
+    </div>
+  </main>
+</div>
+
+<!-- ── DOCX preview modal ──────────────────────────────────────────── -->
+<div class="modal-backdrop" id="preview-modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title" id="preview-title">DOCX Preview</span>
+      <button class="modal-close" id="preview-close" type="button" aria-label="Close">×</button>
+    </div>
+    <iframe id="preview-iframe" class="modal-iframe" title="DOCX preview"></iframe>
+  </div>
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <span>Made with <span class="heart">&#10084;</span> using <strong>MONTASHI-OCR-TRANSLATE</strong></span>
+  <span class="sep">|</span>
+  <span>&copy; 2026 <strong>Md Monsur Ali</strong></span>
+  <span class="sep">|</span>
+  <a href="https://www.linkedin.com/in/mdmonsurali/" target="_blank" rel="noopener">LinkedIn</a>
+  <span class="sep">·</span>
+  <a href="https://inventaai.com/" target="_blank" rel="noopener">Blog</a>
+  <span class="sep">·</span>
+  <a href="https://www.linkedin.com/company/inventaai/" target="_blank" rel="noopener">InventaAI</a>
+  <span class="sep">·</span>
+  <a href="https://medium.com/@monsuralirana/" target="_blank" rel="noopener">Medium</a>
+  <span class="sep">·</span>
+  <a href="https://github.com/mdmonsurali" target="_blank" rel="noopener">GitHub</a>
+</footer>
+
+<script>
+  const SUPPORTED = new Set(['pdf','docx','jpg','jpeg','png']);
+
+  const dropZone     = document.getElementById('drop-zone');
+  const fileInput    = document.getElementById('file-input');
+  const fileNameEl   = document.getElementById('file-name');
+  const fileListEl   = document.getElementById('file-list');
+  const runBtn       = document.getElementById('run-btn');
+  const zipBtn       = document.getElementById('zip-btn');
+  const logBox       = document.getElementById('log-box');
+  const progressWrap = document.getElementById('progress-wrap');
+  const progressBar  = document.getElementById('progress-bar');
+  const progressLabel= document.getElementById('progress-label');
+  const mainTitle    = document.getElementById('main-title');
+  const mainSub      = document.getElementById('main-sub');
+  const resultsTable = document.getElementById('results-table');
+  const resultsWrap  = document.getElementById('results-wrap');
+
+  const modal        = document.getElementById('preview-modal');
+  const modalIframe  = document.getElementById('preview-iframe');
+  const modalTitle   = document.getElementById('preview-title');
+  const modalClose   = document.getElementById('preview-close');
+
+  let selectedFiles = [];      // array of File
+  let successfulIds = [];      // document UUIDs populated as files succeed
+
+  // ── Drop zone ──────────────────────────────────────────────────────────────
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files && e.dataTransfer.files.length) {
+      addFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files.length) {
+      addFiles(Array.from(fileInput.files));
+      fileInput.value = '';   // allow re-selecting the same file
+    }
+  });
+
+  function addFiles(files) {
+    for (const f of files) {
+      const ext = f.name.split('.').pop().toLowerCase();
+      if (!SUPPORTED.has(ext)) continue;
+      // Skip exact duplicates (name + size).
+      if (selectedFiles.some(x => x.name === f.name && x.size === f.size)) continue;
+      selectedFiles.push(f);
+    }
+    renderFileList();
+  }
+
+  function removeFile(idx) {
+    selectedFiles.splice(idx, 1);
+    renderFileList();
+  }
+
+  function renderFileList() {
+    fileListEl.innerHTML = '';
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const f = selectedFiles[i];
+      const row = document.createElement('div');
+      row.className = 'batch-file-item';
+      const label = document.createElement('span');
+      label.textContent = `${f.name}  (${(f.size/1024).toFixed(1)} KB)`;
+      const btn = document.createElement('button');
+      btn.className = 'rm';
+      btn.type = 'button';
+      btn.textContent = '×';
+      btn.title = 'Remove';
+      btn.addEventListener('click', () => removeFile(i));
+      row.appendChild(label);
+      row.appendChild(btn);
+      fileListEl.appendChild(row);
+    }
+    const n = selectedFiles.length;
+    fileNameEl.textContent = n === 0 ? '' : `${n} file${n === 1 ? '' : 's'} selected`;
+    runBtn.disabled = n === 0;
+  }
+
+  // ── Run batch OCR ──────────────────────────────────────────────────────────
+  runBtn.addEventListener('click', async () => {
+    if (selectedFiles.length === 0) return;
+
+    runBtn.disabled = true;
+    zipBtn.disabled = true;
+    successfulIds = [];
+    resultsWrap.style.display = 'none';
+    resultsTable.innerHTML = '';
+
+    progressWrap.style.display = 'block';
+    progressBar.classList.add('running');
+    progressBar.style.width = '5%';
+    progressLabel.textContent = 'Uploading…';
+
+    logBox.innerHTML = '';
+    logBox.style.display = 'block';
+
+    mainTitle.textContent = 'Processing…';
+    mainSub.textContent = `${selectedFiles.length} file(s)`;
+    appendLog('inf', `Uploading ${selectedFiles.length} file(s)…`);
+
+    const form = new FormData();
+    for (const f of selectedFiles) form.append('files', f);
+
+    let total = 0;
+    let done = 0;
+    let okCount = 0;
+    let errCount = 0;
+
+    function updateCounter() {
+      progressLabel.textContent = `Processed ${done}/${total}`;
+      progressBar.style.width = total ? `${Math.round((done / total) * 100)}%` : '5%';
+      mainSub.textContent = `${done}/${total} done · ${okCount} ok · ${errCount} failed`;
+    }
+
+    try {
+      progressLabel.textContent = 'Uploading…';
+
+      const resp = await fetch('/ocr/batch', { method: 'POST', body: form });
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => resp.statusText);
+        throw new Error(err || resp.statusText);
+      }
+
+      resultsWrap.style.display = 'flex';
+
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // Parse Server-Sent Events incrementally. Frames are separated by
+      // blank lines; each frame may contain `event:` and `data:` lines.
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          let eventName = 'message';
+          const dataLines = [];
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+          }
+          if (dataLines.length === 0) continue;
+
+          let payload;
+          try { payload = JSON.parse(dataLines.join('\n')); }
+          catch (e) { appendLog('err', 'Bad SSE payload: ' + e.message); continue; }
+
+          if (eventName === 'start') {
+            total = payload.total || 0;
+            done = 0;
+            okCount = 0;
+            errCount = 0;
+            renderInitialCards(payload.items || []);
+            appendLog('inf', `Queued ${total} file(s).`);
+            updateCounter();
+          } else if (eventName === 'result') {
+            applyResult(payload);
+            done += 1;
+            if (payload.status === 'ok') okCount += 1; else errCount += 1;
+            const label = payload.status === 'ok'
+              ? `OK · ${payload.original_name || payload.stem}`
+              : `FAIL · ${payload.original_name || payload.stem} (${payload.error || ''})`;
+            appendLog(payload.status === 'ok' ? 'ok' : 'err', label);
+            updateCounter();
+            zipBtn.disabled = successfulIds.length === 0;
+          } else if (eventName === 'end') {
+            progressBar.style.width = '100%';
+            progressBar.classList.remove('running');
+            progressLabel.textContent = `Done · ${done}/${total}`;
+            mainTitle.textContent = 'Batch Complete';
+            appendLog(errCount ? 'inf' : 'ok',
+              `Done. ${okCount} succeeded, ${errCount} failed in ${payload.total_elapsed_sec}s.`);
+          } else if (eventName === 'error') {
+            throw new Error(payload.detail || 'OCR service error');
+          }
+        }
+      }
+    } catch (err) {
+      appendLog('err', 'ERROR: ' + err.message);
+      progressBar.classList.remove('running');
+      progressBar.style.width = '0%';
+      mainTitle.textContent = 'Error';
+      mainSub.textContent = err.message;
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+
+  // Build a placeholder card for each queued file. Each card gets a stable
+  // data-index so result events can find it later.
+  function renderInitialCards(items) {
+    resultsTable.innerHTML = '';
+    for (const it of items) {
+      const card = document.createElement('div');
+      card.className = 'batch-card';
+      card.dataset.index = String(it.index);
+
+      const meta = document.createElement('div');
+      meta.className = 'batch-meta';
+
+      const name = document.createElement('div');
+      name.className = 'batch-fname';
+      const nameLine = document.createElement('span');
+      nameLine.textContent = it.original_name || it.stem || '(unknown)';
+      name.appendChild(nameLine);
+      meta.appendChild(name);
+
+      const status = document.createElement('div');
+      status.className = 'batch-status pending';
+      status.textContent = 'Queued';
+      meta.appendChild(status);
+      card.appendChild(meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'batch-actions';
+      card.appendChild(actions);
+
+      resultsTable.appendChild(card);
+    }
+    // Mark the first card as "processing" so the user sees activity right away.
+    if (items.length > 0) {
+      const first = resultsTable.querySelector('.batch-card[data-index="0"] .batch-status');
+      if (first) { first.className = 'batch-status running'; first.textContent = 'Processing…'; }
+    }
+  }
+
+  // Patch a card in place with the finished result, exposing download buttons.
+  function applyResult(r) {
+    const card = resultsTable.querySelector(`.batch-card[data-index="${r.index}"]`);
+    if (!card) return;
+
+    const status = card.querySelector('.batch-status');
+    if (r.status === 'ok') {
+      status.className = 'batch-status ok';
+      status.textContent = `Complete · ${r.elapsed_sec || 0}s`;
+    } else {
+      status.className = 'batch-status error';
+      status.title = r.error || 'error';
+      status.textContent = `Failed · ${r.elapsed_sec || 0}s`;
+      const nameDiv = card.querySelector('.batch-fname');
+      if (nameDiv && r.error && !nameDiv.querySelector('.batch-err')) {
+        const err = document.createElement('span');
+        err.className = 'batch-err';
+        err.textContent = r.error;
+        nameDiv.appendChild(err);
+      }
+    }
+
+    const actions = card.querySelector('.batch-actions');
+    actions.innerHTML = '';
+    actions.appendChild(makeDl(r, 'md',   'dl-txt',  'Download MD'));
+    actions.appendChild(makeDl(r, 'docx', 'dl-docx', 'Download DOCX'));
+    actions.appendChild(makeDl(r, 'json', 'dl-json', 'Download JSON'));
+    actions.appendChild(makePreviewBtn(r));
+
+    if (r.status === 'ok' && r.document_id) successfulIds.push(r.document_id);
+
+    // Flip the next still-queued card to "Processing…".
+    const nextIdx = r.index + 1;
+    const next = resultsTable.querySelector(`.batch-card[data-index="${nextIdx}"] .batch-status`);
+    if (next && next.classList.contains('pending')) {
+      next.className = 'batch-status running';
+      next.textContent = 'Processing…';
+    }
+  }
+
+  function makeDl(r, kind, cls, label) {
+    const a = document.createElement('a');
+    a.className = 'dl-btn ' + cls;
+    a.textContent = label;
+    if (r.status === 'ok' && r.document_id) {
+      const url = `/documents/${encodeURIComponent(r.document_id)}/${kind}`;
+      a.href = url;
+      a.classList.add('active');
+      // The ocr_service serves md/json with Content-Disposition: inline so
+      // the single-page preview can render them in-tab; in the batch UI we
+      // want an actual download. Fetch as blob and trigger a save so the
+      // server's inline disposition is ignored.
+      const ext = { md: 'md', json: 'json', docx: 'docx' }[kind] || kind;
+      const stem = (r.original_name || 'output').replace(/\.[^./\\]+$/, '');
+      const filename = `ocr_${stem}.${ext}`;
+      a.addEventListener('click', async (e) => {
+        e.preventDefault();
+        try {
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const blob = await resp.blob();
+          const objUrl = URL.createObjectURL(blob);
+          const tmp = document.createElement('a');
+          tmp.href = objUrl;
+          tmp.download = filename;
+          document.body.appendChild(tmp);
+          tmp.click();
+          tmp.remove();
+          setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+        } catch (err) {
+          appendLog('err', `Download failed (${filename}): ${err.message}`);
+        }
+      });
+    } else {
+      a.href = '#';
+      a.addEventListener('click', e => e.preventDefault());
+    }
+    return a;
+  }
+
+  function makePreviewBtn(r) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dl-btn dl-preview';
+    b.textContent = 'Preview DOCX';
+    if (r.status === 'ok' && r.document_id) {
+      b.classList.add('active');
+      b.addEventListener('click', () => openPreview(r.document_id, r.original_name));
+    } else {
+      b.disabled = true;
+    }
+    return b;
+  }
+
+  // ── DOCX preview modal ─────────────────────────────────────────────────────
+  function openPreview(docId, displayName) {
+    modalTitle.textContent = displayName || docId;
+    modalIframe.src = `/preview/${encodeURIComponent(docId)}`;
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+  function closePreview() {
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+    modalIframe.src = '';
+  }
+  modalClose.addEventListener('click', closePreview);
+  modal.addEventListener('click', e => { if (e.target === modal) closePreview(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && modal.classList.contains('open')) closePreview();
+  });
+
+  // ── Download all as ZIP ────────────────────────────────────────────────────
+  zipBtn.addEventListener('click', async () => {
+    if (successfulIds.length === 0) return;
+    zipBtn.disabled = true;
+    const original = zipBtn.innerHTML;
+    zipBtn.textContent = 'Building ZIP…';
+
+    try {
+      const resp = await fetch('/ocr/batch-zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: successfulIds }),
+      });
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => resp.statusText);
+        throw new Error(err || resp.statusText);
+      }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      a.download = 'OCR_results.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      appendLog('ok', `ZIP downloaded (${successfulIds.length} document(s)).`);
+    } catch (err) {
+      appendLog('err', 'ZIP failed: ' + err.message);
+    } finally {
+      zipBtn.innerHTML = original;
+      zipBtn.disabled = false;
+    }
+  });
+
+  function appendLog(cls, msg) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = msg + '\n';
+    logBox.appendChild(span);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+</script>
+</body>
+</html>

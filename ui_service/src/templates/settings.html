@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR · Settings</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+  <nav class="topbar-nav">
+    <a href="/" class="nav-link">Single</a>
+    <a href="/batch" class="nav-link">Batch</a>
+    <a href="/translator" class="nav-link">Translator</a>
+  </nav>
+  <!-- @@PROFILE_MENU@@ -->
+</div>
+
+<h1 class="page-title">Settings</h1>
+
+<main class="admin-shell">
+  <section class="admin-section">
+    <h2>Account</h2>
+    <div class="admin-form">
+      <div class="row">
+        <label>Username
+          <input type="text" id="me-username" disabled />
+        </label>
+        <label>Role
+          <input type="text" id="me-role" disabled />
+        </label>
+      </div>
+      <p class="admin-hint">Username cannot be changed from this page. Ask an administrator if you need it updated.</p>
+    </div>
+  </section>
+
+  <section class="admin-section">
+    <h2>Change password</h2>
+    <form id="pw-form" class="admin-form" autocomplete="off">
+      <div class="row">
+        <label>Current password
+          <input type="password" name="current_password" autocomplete="current-password" required />
+        </label>
+        <label>New password
+          <input type="password" name="new_password" minlength="8" autocomplete="new-password" required />
+        </label>
+        <label>Confirm new password
+          <input type="password" name="confirm_password" minlength="8" autocomplete="new-password" required />
+        </label>
+        <button type="submit" class="auth-btn auth-btn-sm">Update password</button>
+      </div>
+    </form>
+    <div id="pw-msg" class="admin-msg" hidden></div>
+  </section>
+
+  <section class="admin-section danger-card" id="delete-account-section" hidden>
+    <h2>Delete account</h2>
+    <p class="admin-hint">
+      Permanently delete your account. All documents you have processed
+      (originals plus every generated Markdown, JSON, DOCX, and picture
+      crop) will be removed from the database and object storage. This
+      cannot be undone.
+    </p>
+    <div class="row">
+      <button type="button" id="delete-account-btn" class="btn-danger">Delete my account</button>
+    </div>
+    <div id="delete-msg" class="admin-msg" hidden></div>
+  </section>
+</main>
+
+<script>
+  const form = document.getElementById("pw-form");
+  const msg  = document.getElementById("pw-msg");
+
+  async function loadMe() {
+    try {
+      const r = await fetch("/me", { credentials: "same-origin" });
+      if (!r.ok) return;
+      const m = await r.json();
+      document.getElementById("me-username").value = m.username || "";
+      document.getElementById("me-role").value = m.role || "";
+      // Master is the un-deletable super-admin; hide the delete section entirely.
+      if (m.role !== "master") {
+        document.getElementById("delete-account-section").hidden = false;
+      }
+    } catch (_) {}
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    msg.hidden = true;
+    const fd = new FormData(form);
+    const cur = fd.get("current_password");
+    const np  = fd.get("new_password");
+    const cp  = fd.get("confirm_password");
+    if (np !== cp) {
+      msg.textContent = "New password and confirmation do not match.";
+      msg.className = "admin-msg admin-err";
+      msg.hidden = false;
+      return;
+    }
+    const body = new URLSearchParams();
+    body.set("current_password", cur);
+    body.set("new_password", np);
+    body.set("confirm_password", cp);
+    const r = await fetch("/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      credentials: "same-origin",
+      redirect: "manual",
+    });
+    // change-password returns 303 on success. With redirect:manual we get an
+    // opaque response — treat that as success too.
+    if (r.type === "opaqueredirect" || r.ok || r.status === 303) {
+      msg.textContent = "Password updated.";
+      msg.className = "admin-msg admin-ok";
+      msg.hidden = false;
+      form.reset();
+    } else {
+      msg.textContent = `Update failed (HTTP ${r.status})`;
+      msg.className = "admin-msg admin-err";
+      msg.hidden = false;
+    }
+  });
+
+  const deleteBtn = document.getElementById("delete-account-btn");
+  const deleteMsg = document.getElementById("delete-msg");
+  deleteBtn.addEventListener("click", async () => {
+    const u = document.getElementById("me-username").value || "your account";
+    const proceed = await window.uiConfirm({
+      title: "Delete account?",
+      body: `Delete ${u}? This also removes every document you have processed. This action cannot be undone.`,
+      okLabel: "Continue",
+      danger: true,
+    });
+    if (!proceed) return;
+    const typed = await window.uiPrompt({
+      title: "Final confirmation",
+      body: `Type DELETE to permanently delete ${u}.`,
+      placeholder: "DELETE",
+      okLabel: "Delete account",
+      danger: true,
+    });
+    if (typed !== "DELETE") return;
+    deleteBtn.disabled = true;
+    try {
+      const r = await fetch("/account/delete", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (r.ok) {
+        // Cookie is already cleared server-side. Force a hard navigation so
+        // bfcache can't reveal the previous authed page.
+        window.location.replace("/login");
+        return;
+      }
+      const body = await r.json().catch(() => ({}));
+      deleteMsg.textContent = `Delete failed: ${body.detail || r.status}`;
+      deleteMsg.className = "admin-msg admin-err";
+      deleteMsg.hidden = false;
+      deleteBtn.disabled = false;
+    } catch (e) {
+      deleteMsg.textContent = `Delete failed: ${e.message}`;
+      deleteMsg.className = "admin-msg admin-err";
+      deleteMsg.hidden = false;
+      deleteBtn.disabled = false;
+    }
+  });
+
+  loadMe();
+</script>
+</body>
+</html>

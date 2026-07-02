@@ -1,0 +1,287 @@
+name: montashi-ocr
+
+services:
+  ocr_service:
+    build:
+      context: .
+      dockerfile: ocr_service/Dockerfile
+    image: unlimited-ocr:local
+    container_name: ocr_service
+    ports:
+      - "${VLLM_PORT:-8888}:8888"
+    environment:
+      - VLLM_PORT=${VLLM_PORT:-8888}
+      - VLLM_SERVICE_URL=http://localhost:${VLLM_PORT:-8888}
+      - OCR_SERVICE_PORT=${OCR_SERVICE_PORT:-8001}
+      - GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.50}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+      - VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8}
+      - OCR_BATCH_SIZE=${OCR_BATCH_SIZE:-2}
+      - OCR_BATCH_SIZE_NATIVE=${OCR_BATCH_SIZE_NATIVE:-16}
+      - OCR_BATCH_SIZE_SCANNED=${OCR_BATCH_SIZE_SCANNED:-4}
+      - OCR_MAX_TOKENS=${OCR_MAX_TOKENS:-32000}
+      - OCR_IMAGE_MODE=${OCR_IMAGE_MODE:-base}
+      - INCLUDE_PICTURES=${INCLUDE_PICTURES:-true}
+      - ATTRIBUTE_STYLES=${ATTRIBUTE_STYLES:-true}
+      - FORMULA_SIZE_MULTIPLIER=${FORMULA_SIZE_MULTIPLIER:-1.6}
+      - FORMULA_BOLD=${FORMULA_BOLD:-true}
+      # Postgres
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-dotsocr}
+      - POSTGRES_USER=${POSTGRES_USER:-dotsocr}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      # MinIO
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-changeme}
+      - MINIO_BUCKET=${MINIO_BUCKET:-dotsocr}
+      - MINIO_REGION=${MINIO_REGION:-us-east-1}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - MINIO_UPLOAD_CONCURRENCY=${MINIO_UPLOAD_CONCURRENCY:-8}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+        limits:
+          memory: 16G
+    shm_size: '16gb'
+    ipc: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 24h
+      timeout: 10s
+      retries: 1
+      start_period: 360s
+      start_interval: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - dotsocr-network
+
+  ui_service:
+    build:
+      context: ./ui_service
+      dockerfile: Dockerfile
+    image: dotsocr_ui:latest
+    container_name: ui_service
+    ports:
+      - "${UI_SERVICE_PORT:-8000}:8000"
+    environment:
+      - OCR_SERVICE_URL=http://ocr_service:8001
+      - AUTH_SERVICE_URL=http://auth_service:8002
+      - TRANSLATOR_SERVICE_URL=http://translator_service:8003
+      - ORCHESTRATOR_SERVICE_URL=http://orchestrator_service:8004
+    depends_on:
+      ocr_service:
+        condition: service_healthy
+      auth_service:
+        condition: service_healthy
+      orchestrator_service:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - dotsocr-network
+
+  orchestrator_service:
+    build:
+      context: .
+      dockerfile: orchestrator_service/Dockerfile
+    image: montashi-orchestrator:latest
+    container_name: orchestrator_service
+    environment:
+      - ORCHESTRATOR_SERVICE_PORT=8004
+      - OCR_SERVICE_URL=http://ocr_service:8001
+      - TRANSLATOR_SERVICE_URL=http://translator_service:8003
+      - GPU_SWAP=${GPU_SWAP:-true}
+      - OCR_CONTAINER_NAME=ocr_service
+      - TRANSLATOR_CONTAINER_NAME=translator_service
+      - SWAP_HEALTH_TIMEOUT_SEC=${SWAP_HEALTH_TIMEOUT_SEC:-300}
+      - TRANSLATE_TARGET_LANG=${TRANSLATE_TARGET_LANG:-pt-BR}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      ocr_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - dotsocr-network
+
+  translator_service:
+    build:
+      context: .
+      dockerfile: translator_service/Dockerfile
+    image: montashi-translator:latest
+    container_name: translator_service
+    environment:
+      - TRANSLATOR_SERVICE_PORT=8003
+      - OCR_SERVICE_URL=http://ocr_service:8001
+      - CUDA_VISIBLE_DEVICES=0
+      # llama.cpp tuning
+      - LLAMA_HOST=127.0.0.1
+      - LLAMA_PORT=${LLAMA_PORT:-8090}
+      - LLAMA_GPU_LAYERS=${LLAMA_GPU_LAYERS:-999}
+      - LLAMA_CTX_SIZE=${LLAMA_CTX_SIZE:-8192}
+      - LLAMA_PARALLEL=${LLAMA_PARALLEL:-2}
+      # Translation behaviour
+      - TRANSLATE_TARGET_LANG=${TRANSLATE_TARGET_LANG:-pt-BR}
+      - TRANSLATE_CONCURRENCY=${TRANSLATE_CONCURRENCY:-2}
+      - TRANSLATE_CHUNK_ITEMS=${TRANSLATE_CHUNK_ITEMS:-20}
+      - TRANSLATE_CHUNK_BYTES=${TRANSLATE_CHUNK_BYTES:-4000}
+      - TRANSLATE_MAX_TOKENS=${TRANSLATE_MAX_TOKENS:-4096}
+      # Formula rendering style (used when generating the translated DOCX)
+      - FORMULA_SIZE_MULTIPLIER=${FORMULA_SIZE_MULTIPLIER:-1.6}
+      - FORMULA_BOLD=${FORMULA_BOLD:-true}
+      # Postgres
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-dotsocr}
+      - POSTGRES_USER=${POSTGRES_USER:-dotsocr}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      # MinIO
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-changeme}
+      - MINIO_BUCKET=${MINIO_BUCKET:-dotsocr}
+      - MINIO_REGION=${MINIO_REGION:-us-east-1}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - MINIO_UPLOAD_CONCURRENCY=${MINIO_UPLOAD_CONCURRENCY:-8}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${TRANSLATOR_GPU_DEVICE_ID:-${GPU_DEVICE_ID:-0}}"]
+              capabilities: [gpu]
+        limits:
+          memory: 16G
+    shm_size: '8gb'
+    ipc: host
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 600s
+      start_interval: 15s
+    depends_on:
+      ocr_service:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - dotsocr-network
+
+  auth_service:
+    build:
+      context: .
+      dockerfile: auth_service/Dockerfile
+    image: montashi-auth:latest
+    container_name: auth_service
+    ports:
+      - "${AUTH_SERVICE_PORT:-8002}:8002"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-dotsocr}
+      - POSTGRES_USER=${POSTGRES_USER:-dotsocr}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - MASTER_USERNAME=${MASTER_USERNAME:-${ADMIN_USERNAME:-master}}
+      - MASTER_PASSWORD=${MASTER_PASSWORD:-${ADMIN_PASSWORD:?MASTER_PASSWORD or ADMIN_PASSWORD must be set}}
+      - SESSION_TTL_HOURS=${SESSION_TTL_HOURS:-12}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - OCR_SERVICE_URL=http://ocr_service:8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/auth/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - dotsocr-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dotsocr}
+      POSTGRES_USER: ${POSTGRES_USER:-dotsocr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-dotsocr} -d $${POSTGRES_DB:-dotsocr}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - dotsocr-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - dotsocr-network
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme}
+      MINIO_BUCKET: ${MINIO_BUCKET:-dotsocr}
+    entrypoint: >
+      sh -c "
+        mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" &&
+        mc mb --ignore-existing local/\"$$MINIO_BUCKET\" &&
+        echo 'minio bucket ready: '\"$$MINIO_BUCKET\"
+      "
+    restart: "no"
+    networks:
+      - dotsocr-network
+
+volumes:
+  pg_data:
+  minio_data:
+
+networks:
+  dotsocr-network:
+    driver: bridge

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR · Sign in</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+</div>
+
+<main class="auth-shell">
+  <form class="auth-card" method="POST" action="/login" autocomplete="on">
+    <h1>Sign in</h1>
+    <p class="auth-sub">Enter your credentials to continue.</p>
+
+    <div id="auth-error" class="auth-error" hidden></div>
+
+    <label class="auth-label" for="username">Username</label>
+    <input class="auth-input" type="text" id="username" name="username"
+           autocomplete="username" required autofocus />
+
+    <label class="auth-label" for="password">Password</label>
+    <input class="auth-input" type="password" id="password" name="password"
+           autocomplete="current-password" required />
+
+    <input type="hidden" name="next" id="next" />
+
+    <button class="auth-btn" type="submit">Sign in</button>
+
+    <p class="auth-foot">Don't have an account? Ask an administrator.</p>
+  </form>
+</main>
+
+<script>
+  const params = new URLSearchParams(window.location.search);
+  const next = params.get("next");
+  if (next) document.getElementById("next").value = next;
+
+  const err = params.get("err");
+  if (err) {
+    const box = document.getElementById("auth-error");
+    box.textContent = decodeURIComponent(err);
+    box.hidden = false;
+  }
+</script>
+</body>
+</html>

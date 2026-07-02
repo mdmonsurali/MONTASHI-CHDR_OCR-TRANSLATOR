@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MONTASHI-OCR-TRANSLATOR · Admin</title>
+  <link rel="stylesheet" href="/static/style.css?v=9" />
+</head>
+<body>
+
+<div class="topbar">
+  <span class="logo">MONTASHI-OCR-TRANSLATOR</span>
+  <nav class="topbar-nav">
+    <a href="/" class="nav-link">Single</a>
+    <a href="/batch" class="nav-link">Batch</a>
+    <a href="/translator" class="nav-link">Translator</a>
+  </nav>
+  <!-- @@PROFILE_MENU@@ -->
+</div>
+
+<h1 class="page-title">Administration</h1>
+
+<main class="admin-shell">
+  <section class="admin-section">
+    <h2>Create user</h2>
+    <form id="create-user-form" class="admin-form">
+      <div class="row">
+        <label>Username
+          <input type="text" name="username" required minlength="3" maxlength="32"
+                 pattern="[A-Za-z0-9_.\-]{3,32}" />
+        </label>
+        <label>Temporary password
+          <input type="text" name="password" required minlength="8" />
+        </label>
+        <label>Role
+          <select name="role" id="create-role">
+            <option value="user" selected>user</option>
+            <option value="admin" id="create-role-admin">admin</option>
+          </select>
+        </label>
+        <button type="submit" class="auth-btn auth-btn-sm">Create</button>
+      </div>
+      <p class="admin-hint">The user will be forced to change this password on first login.</p>
+    </form>
+    <div id="create-msg" class="admin-msg" hidden></div>
+  </section>
+
+  <section class="admin-section">
+    <h2>Users</h2>
+    <div class="history-toolbar">
+      <span id="users-summary" class="history-summary"></span>
+    </div>
+    <table class="admin-table" id="users-table">
+      <thead>
+        <tr>
+          <th class="col-num">#</th>
+          <th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="6">Loading…</td></tr></tbody>
+    </table>
+    <nav class="pagination pagination-center" id="users-pagination" aria-label="Users pagination"></nav>
+  </section>
+</main>
+
+<script>
+  const createForm = document.getElementById("create-user-form");
+  const createMsg = document.getElementById("create-msg");
+  const tableBody = document.querySelector("#users-table tbody");
+  const usersSummary = document.getElementById("users-summary");
+  const usersPager   = document.getElementById("users-pagination");
+
+  const USERS_PAGE_SIZE = 5;
+  let allUsers = [];
+  let usersPage = 1;
+  let meRole = "admin";   // pessimistic default; overwritten by loadMe()
+
+  async function loadMe() {
+    try {
+      const r = await fetch("/me", { credentials: "same-origin" });
+      if (!r.ok) return;
+      const m = await r.json();
+      meRole = m.role || "admin";
+      // Only the master may create new admin accounts.
+      const adminOpt = document.getElementById("create-role-admin");
+      if (adminOpt && meRole !== "master") {
+        adminOpt.remove();
+      }
+    } catch (_) {}
+  }
+
+  async function loadUsers() {
+    const r = await fetch("/admin/users");
+    if (!r.ok) {
+      tableBody.innerHTML = `<tr><td colspan="6">Failed to load (${r.status})</td></tr>`;
+      usersPager.innerHTML = "";
+      usersSummary.textContent = "";
+      return;
+    }
+    allUsers = await r.json();
+    // Clamp page if rows shrank (e.g. after a delete).
+    const pages = Math.max(1, Math.ceil(allUsers.length / USERS_PAGE_SIZE));
+    if (usersPage > pages) usersPage = pages;
+    renderUsers();
+  }
+
+  function renderUsers() {
+    if (!allUsers.length) {
+      tableBody.innerHTML = `<tr><td colspan="6">No users yet.</td></tr>`;
+      usersPager.innerHTML = "";
+      usersSummary.textContent = "0 of 0";
+      return;
+    }
+    const startIdx = (usersPage - 1) * USERS_PAGE_SIZE;
+    const slice = allUsers.slice(startIdx, startIdx + USERS_PAGE_SIZE);
+    const isMaster = meRole === "master";
+    tableBody.innerHTML = slice.map((u, i) => `
+      <tr data-id="${u.id}" data-role="${u.role}">
+        <td class="col-num">${startIdx + i + 1}</td>
+        <td>${escapeHtml(u.username)}</td>
+        <td>${u.role}</td>
+        <td>${u.disabled ? '<span class="badge badge-off">disabled</span>' : '<span class="badge badge-on">active</span>'}</td>
+        <td>${new Date(u.created_at).toLocaleString()}</td>
+        <td class="actions">
+          <button class="link-btn" data-action="rename">Rename</button>
+          ${isMaster ? `<button class="link-btn" data-action="role">Change role</button>` : ''}
+          <button class="link-btn" data-action="reset">Reset password</button>
+          <button class="link-btn" data-action="toggle">${u.disabled ? 'Enable' : 'Disable'}</button>
+          <button class="link-btn danger" data-action="delete">Delete</button>
+        </td>
+      </tr>
+    `).join("");
+    usersSummary.textContent = `${startIdx + 1}–${startIdx + slice.length} of ${allUsers.length}`;
+    renderUsersPager();
+  }
+
+  function renderUsersPager() {
+    const pages = Math.max(1, Math.ceil(allUsers.length / USERS_PAGE_SIZE));
+    if (pages <= 1) { usersPager.innerHTML = ""; return; }
+    const cur = usersPage;
+    const out = [];
+    out.push(`<button class="page-btn" data-page="${cur - 1}" ${cur === 1 ? "disabled" : ""}>‹ Prev</button>`);
+    const windowSet = new Set([1, pages, cur - 1, cur, cur + 1]);
+    for (let i = 1; i <= pages; i++) {
+      if (i === 1 || i === pages || (i >= cur - 1 && i <= cur + 1)) windowSet.add(i);
+    }
+    const sorted = [...windowSet].filter(n => n >= 1 && n <= pages).sort((a,b)=>a-b);
+    let last = 0;
+    for (const n of sorted) {
+      if (n - last > 1) out.push(`<span class="page-ellipsis">…</span>`);
+      out.push(`<button class="page-btn ${n === cur ? "page-active" : ""}" data-page="${n}">${n}</button>`);
+      last = n;
+    }
+    out.push(`<button class="page-btn" data-page="${cur + 1}" ${cur === pages ? "disabled" : ""}>Next ›</button>`);
+    usersPager.innerHTML = out.join("");
+  }
+
+  usersPager.addEventListener("click", (e) => {
+    const b = e.target.closest("button.page-btn");
+    if (!b || b.disabled) return;
+    const p = Number(b.dataset.page);
+    if (!Number.isFinite(p) || p < 1) return;
+    usersPage = p;
+    renderUsers();
+  });
+
+  tableBody.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const tr = btn.closest("tr");
+    const id = tr.dataset.id;
+    const action = btn.dataset.action;
+    const username = tr.querySelectorAll("td")[1].textContent;
+
+    if (action === "rename") {
+      const next = await window.uiPrompt({
+        title: "Rename user",
+        body: `New username for ${username}:`,
+        placeholder: username,
+        okLabel: "Rename",
+      });
+      if (!next || next === username) return;
+      await patchUser(id, { username: next });
+    } else if (action === "role") {
+      const currentRole = tr.dataset.role || "user";
+      const nextRole = currentRole === "admin" ? "user" : "admin";
+      const ok = await window.uiConfirm({
+        title: "Change role",
+        body: `Change ${username} from "${currentRole}" to "${nextRole}"? ` +
+              (nextRole === "admin"
+                 ? "They will be able to see and manage all regular users."
+                 : "They will lose access to the Administration page."),
+        okLabel: `Make ${nextRole}`,
+      });
+      if (!ok) return;
+      await patchUser(id, { role: nextRole });
+    } else if (action === "reset") {
+      const np = await window.uiPrompt({
+        title: "Reset password",
+        body: `New temporary password for ${username}. The user will be forced to change it on next login.`,
+        placeholder: "new temporary password",
+        okLabel: "Reset password",
+      });
+      if (!np) return;
+      await patchUser(id, { password: np });
+    } else if (action === "toggle") {
+      const wantDisable = btn.textContent.trim() === "Disable";
+      await patchUser(id, { disabled: wantDisable });
+    } else if (action === "delete") {
+      const ok = await window.uiConfirm({
+        title: "Delete user?",
+        body: `Delete user ${username}? This removes the account and every document they have processed. This cannot be undone.`,
+        okLabel: "Delete",
+        danger: true,
+      });
+      if (!ok) return;
+      const r = await fetch(`/admin/users/${id}`, { method: "DELETE" });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        await window.uiAlert({
+          title: "Delete failed",
+          body: body.detail || `HTTP ${r.status}`,
+          danger: true,
+        });
+      }
+      loadUsers();
+    }
+  });
+
+  async function patchUser(id, payload) {
+    const r = await fetch(`/admin/users/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      await window.uiAlert({
+        title: "Update failed",
+        body: body.detail || `HTTP ${r.status}`,
+        danger: true,
+      });
+    }
+    loadUsers();
+  }
+
+  createForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    createMsg.hidden = true;
+    const fd = new FormData(createForm);
+    const payload = {
+      username: fd.get("username"),
+      password: fd.get("password"),
+      role: fd.get("role"),
+    };
+    const r = await fetch("/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      createMsg.textContent = `Create failed: ${body.detail || r.status}`;
+      createMsg.className = "admin-msg admin-err";
+    } else {
+      createMsg.textContent = `Created ${body.username}. They must change this password on first login.`;
+      createMsg.className = "admin-msg admin-ok";
+      createForm.reset();
+    }
+    createMsg.hidden = false;
+    loadUsers();
+  });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
+  }
+
+  loadMe().then(loadUsers);
+</script>
+</body>
+</html>

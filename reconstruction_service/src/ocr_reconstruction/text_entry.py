@@ -1,0 +1,77 @@
+"""Plain-text entry rendering (Title, Section-header, Text, List-item,
+Caption, etc.). Floating text box with frozen wrap + pinned exact line
+height so Word renders exactly the lines we measured."""
+from __future__ import annotations
+
+import re
+from typing import Dict, Optional
+
+
+def render_text_entry(ctx, entry: Dict) -> None:
+    from .geometry import bbox_px_to_emu
+    from .ooxml import (
+        build_anchored_textbox_xml, build_paragraph_xml, build_run_xml,
+    )
+    from .text_fit import fit_multiline
+
+    text = (entry.get("text") or "").strip()
+    if not text:
+        return
+    bbox = entry.get("bbox")
+    if not bbox or len(bbox) != 4:
+        return
+    category = entry.get("category", "")
+    x, y, w, h = bbox_px_to_emu(
+        bbox, ctx.zoom, ctx.page_w_pt, ctx.page_h_pt,
+    )
+    style = dict(entry.get("style") or {})
+    alignment = "center" if category == "Title" else None
+    # Strip leading markdown decorations the VLM may have emitted.
+    text = re.sub(r"^\s*#+\s*", "", text)
+    text = text.replace("**", "")
+    # Normalise inline LaTeX ($...$ / \(...\)) — units, ±, subscripts, Greek —
+    # to plain Unicode BEFORE measuring/wrapping, so the frozen wrap matches
+    # what actually renders (the fixed-height text box hard-clips overflow, so
+    # measurement must equal render). Display $$...$$ formulas are a separate
+    # entry category and never reach here.
+    from .latex_inline import strip_inline_math_to_plain
+    text = strip_inline_math_to_plain(text)
+
+    # Binary-search the largest font size at which `text` word-wraps to fit
+    # inside the OCR bbox (both width AND height), and capture the exact
+    # wrap. Only shrinks; if the OCR-detected size already fits it is
+    # returned as-is. We then FREEZE that wrap into hard line breaks and pin
+    # an exact line height so Word renders precisely the lines we measured
+    # and they fill exactly the box height — no last-line clip.
+    x1, y1, x2, y2 = bbox
+    box_w_pt = max(1.0, (x2 - x1) / ctx.zoom)
+    box_h_pt = max(1.0, (y2 - y1) / ctx.zoom)
+    base_size_pt = float(style.get("size") or 11.0)
+    fitted, lines = fit_multiline(text, box_w_pt, box_h_pt, max_size_pt=base_size_pt)
+    if fitted < base_size_pt:
+        style["size"] = fitted
+
+    line_pt: Optional[float] = None
+    render_text = text
+    # `lines is None` means fit_multiline couldn't fit even at min font.
+    # In that case let the textbox grow (spAutoFit) instead of clipping.
+    body_auto_fit = lines is None
+    if lines:
+        render_text = "\n".join(lines)        # freeze the measured wrap
+        if len(lines) >= 2:
+            used_size = float(style.get("size") or 11.0)
+            exact = box_h_pt / len(lines)      # N lines exactly fill the bbox
+            # Cap the per-line slot at ~1.5x the glyph size. When the OCR bbox
+            # is taller than the wrapped text needs, filling it exactly would
+            # inflate the apparent line spacing; capping only shrinks the slot
+            # (spare height falls to the box bottom) so no line can clip.
+            line_pt = min(exact, used_size * 1.5)
+
+    runs_xml = build_run_xml(render_text, style)
+    para_xml = build_paragraph_xml(runs_xml, alignment=alignment, line_pt=line_pt)
+    ctx.xml_chunks.append(
+        build_anchored_textbox_xml(
+            x, y, w, h, para_xml, ctx._next_id(),
+            body_auto_fit=body_auto_fit,
+        )
+    )
