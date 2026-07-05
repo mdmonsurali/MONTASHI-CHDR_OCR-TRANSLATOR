@@ -98,20 +98,68 @@ class TableHTMLParser(HTMLParser):
         if self.in_cell:
             self.current_cell += data
 
+    def finalize(self):
+        """Flush any cell/row/table left open because the HTML was truncated.
+
+        OCR/VLM output is frequently cut off mid-table (no closing ``</td>`` /
+        ``</tr>`` / ``</table>``). Without this, an unterminated ``<table>`` is
+        dropped entirely and the whole table silently falls back to raw-text
+        rendering. We close the open cell, row and table in order so the
+        content is still recovered as a table.
+        """
+        if self.in_cell:
+            self.current_row.append((
+                self.current_cell.strip(),
+                self.current_colspan,
+                self.current_rowspan,
+            ))
+            self.in_cell = False
+            self.current_cell = ""
+        if self.current_row:
+            self.current_table.append((self.current_row, self.in_header))
+            self.current_row = []
+        if self.current_table and self.current_table not in self.tables:
+            self.tables.append(self.current_table)
+            self.current_table = []
+
+
+# Sanity bounds. OCR/VLM output on unparseable pages (rotated CAD drawings,
+# scans) sometimes hallucinates tables with hundreds of near-identical rows or
+# dozens of repeated header columns. These caps keep such garbage bounded so it
+# can't overflow the page or explode render time; they're far above any real
+# table seen in these documents.
+MAX_TABLE_ROWS = 200
+MAX_TABLE_COLS = 40
+
 
 def parse_html_table_rows(
     html_string: str,
 ) -> List[Tuple[List[Tuple[str, int, int]], bool]]:
     """Return a flat list of (cells, is_header) pairs across all tables found.
 
-    Each cell is `(text, colspan, rowspan)`.
+    Each cell is `(text, colspan, rowspan)`. Robust to truncated HTML (missing
+    closing tags) and to runaway/degenerate OCR output: consecutive byte-
+    identical rows are collapsed and the total row count is capped.
     """
     parser = TableHTMLParser()
-    parser.feed(html_string)
+    try:
+        parser.feed(html_string)
+    except Exception:
+        pass
+    parser.finalize()   # recover any table left open by truncated HTML
+
     rows: List[Tuple[List[Tuple[str, int, int]], bool]] = []
+    prev_sig = None
     for table in parser.tables:
         for row, is_header in table:
+            # Collapse runs of identical rows (a common hallucination shape).
+            sig = tuple((t, cs, rs) for (t, cs, rs) in row)
+            if sig == prev_sig:
+                continue
+            prev_sig = sig
             rows.append((row, is_header))
+            if len(rows) >= MAX_TABLE_ROWS:
+                return rows
     return rows
 
 
@@ -169,6 +217,135 @@ def _longest_token_width(s: str) -> int:
     return best
 
 
+def _normalize_column_granularity(
+    rows: List[Tuple[List[Tuple[str, int, int]], bool]],
+) -> List[Tuple[List[Tuple[str, int, int]], bool]]:
+    """Re-span under-segmented rows onto the table body's column boundaries.
+
+    OCR/VLM output for merged-cell tables is often inconsistent: the body rows
+    encode each logical column as several grid columns via ``colspan`` (e.g.
+    every cell ``colspan=2``), but the header row — or a stray name cell — is
+    emitted as single-width ``<td>``s, sometimes with empty separator ``<td>``s
+    between them. Placed as-is, those finer cells land on the wrong grid columns
+    and the header stops lining up with the body (and, because the leading cells
+    are too narrow, downstream rowspan cells get shifted a column over too).
+
+    We fix this BEFORE grid placement so the correction propagates: rows that
+    are narrower than the table's full width get their non-empty cells re-spanned
+    across the body's canonical column boundaries, absorbing the empty artifact
+    cells.
+
+    Crucially the re-span is ROWSPAN-AWARE. A narrow row is not always a full
+    row minus artifacts — it can be a sub-header sitting *under* a ``colspan``
+    header while the outer columns are already covered by ``rowspan`` cells from
+    the row above (e.g. a ``样品组别 / 旋入扭矩 / [失效扭矩 spanning 扭矩值|失效模式] /
+    比值`` header block). There the narrow row's cells belong only in the free
+    middle columns, NOT stretched across the whole width. We therefore place
+    rows top-to-bottom tracking rowspan occupancy, and re-span each narrow row's
+    content cells across only the canonical segments still FREE in that row. If
+    the content-cell count doesn't match the free-segment count, we leave the
+    row untouched rather than guess.
+
+    This is a strict no-op for well-formed tables — uniform-width tables,
+    all-``colspan`` tables with nothing under-segmented, ragged data tables
+    whose short rows have genuine trailing empties, and sub-header rows that
+    already sit correctly under a rowspan block are all left byte-identical.
+
+    Returns the SAME ``rows`` object when nothing changed, so callers can detect
+    the no-op cheaply.
+    """
+    def _row_width(cells):
+        return sum(max(1, cs) for (_t, cs, _rs) in cells)
+
+    def _boundaries(cells):
+        b = {0}
+        col = 0
+        for (_t, cs, _rs) in cells:
+            col += max(1, cs)
+            b.add(col)
+        return b
+
+    widths = [_row_width(cells) for cells, _ in rows]
+    if not widths:
+        return rows
+    maxw = max(widths)
+
+    # The body granularity is defined by the rows that fill the full width. Need
+    # a stable majority (>= 2) so one over-segmented outlier can't define it.
+    full = [cells for (cells, _), w in zip(rows, widths) if w == maxw]
+    if len(full) < 2:
+        return rows
+
+    # Canonical boundaries: column edges present in EVERY full-width row.
+    canon = set.intersection(*[_boundaries(c) for c in full])
+    # If the body is already one-cell-per-column there's no coarser grid to
+    # align a finer row to — nothing to normalize.
+    if canon == set(range(maxw + 1)):
+        return rows
+    bounds = sorted(canon)          # e.g. [0, 2, 4, 6]
+    n_seg = len(bounds) - 1
+
+    # Track rowspan occupancy exactly as parse_table_grid will: place each row's
+    # (possibly rewritten) cells into a sparse grid so later rows can see which
+    # columns are already taken by a rowspan descending from above.
+    occ = [[False] * maxw for _ in range(len(rows))]
+
+    new_rows: List[Tuple[List[Tuple[str, int, int]], bool]] = []
+    changed = False
+    for row_idx, ((cells, is_header), w) in enumerate(zip(rows, widths)):
+        emit_cells = cells
+
+        if w < maxw:
+            # Which canonical segments are FREE in this row (no column covered
+            # by a rowspan from above)? A segment must be wholly free to count;
+            # a segment straddling free + occupied columns is ambiguous -> bail.
+            free_segs: List[int] = []
+            straddle = False
+            for si in range(n_seg):
+                cols = range(bounds[si], bounds[si + 1])
+                covered = [occ[row_idx][c] for c in cols]
+                if not any(covered):
+                    free_segs.append(si)
+                elif not all(covered):
+                    straddle = True
+                    break
+
+            if not straddle:
+                content = [
+                    (t, rs) for (t, _cs, rs) in cells if (t or "").strip()
+                ]
+                # Re-span content cells across the free segments, one per
+                # segment. Only when the counts line up exactly — otherwise we
+                # can't unambiguously map cells to segments, so leave as-is.
+                if content and len(content) == len(free_segs):
+                    rebuilt = []
+                    for (t, rs), si in zip(content, free_segs):
+                        b0, b1 = bounds[si], bounds[si + 1]
+                        rebuilt.append((t, max(1, b1 - b0), rs))
+                    if rebuilt != list(cells):
+                        emit_cells = rebuilt
+                        changed = True
+
+        new_rows.append((emit_cells, is_header))
+
+        # Place emit_cells into `occ` (skipping already-occupied columns) so
+        # the rowspans this row starts are visible to subsequent rows.
+        col = 0
+        for (_t, cs, rs) in emit_cells:
+            while col < maxw and occ[row_idx][col]:
+                col += 1
+            if col >= maxw:
+                break
+            cs = min(max(1, cs), maxw - col)
+            rs = min(max(1, rs), len(rows) - row_idx)
+            for rr in range(row_idx, row_idx + rs):
+                for cc in range(col, col + cs):
+                    occ[rr][cc] = True
+            col += cs
+
+    return new_rows if changed else rows
+
+
 def parse_table_grid(
     rows: List[Tuple[List[Tuple[str, int, int]], bool]],
 ) -> Tuple[
@@ -180,31 +357,61 @@ def parse_table_grid(
     """Walk parsed (cells, is_header) rows into a sparse grid.
 
     Returns (max_cols, n_rows, cell_anchors, occupied).
+
+    The grid width is the MODAL row width, not the maximum. OCR frequently
+    mis-segments a single row (an extra spurious split, a stray colspan) so
+    that one row is wider than all the others; taking the max would let that
+    outlier stretch every other row and shift merged headers out of alignment.
+    Using the most common width instead is robust to such outliers. As a
+    safeguard we never make the grid narrower than the widest row's last
+    NON-EMPTY cell, so real content is never clipped — only trailing empty
+    padding from an over-segmented row is dropped. A hard cap keeps
+    hallucinated many-column headers bounded.
     """
+    from collections import Counter
+
+    # Repair header/body column-granularity mismatch from OCR under-segmentation
+    # before placing cells, so the correction propagates to rowspan placement.
+    rows = _normalize_column_granularity(rows)
+
+    n_rows = len(rows)
+
     def _row_width(row_cells):
         return sum(max(1, cs) for (_t, cs, _rs) in row_cells)
-    max_cols = max((_row_width(r[0]) for r in rows), default=1) or 1
-    n_rows = len(rows)
-    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]] = {}
-    occupied: List[List[bool]] = [
-        [False] * max_cols for _ in range(n_rows)
-    ]
-    for row_idx, (cells, is_header) in enumerate(rows):
-        col = 0
-        for (cell_text, cs, rs) in cells:
-            while col < max_cols and occupied[row_idx][col]:
-                col += 1
-            if col >= max_cols:
-                break
-            cs = max(1, cs)
-            rs = max(1, rs)
-            cs = min(cs, max_cols - col)
-            rs = min(rs, n_rows - row_idx)
-            cell_anchors[(row_idx, col)] = (cell_text, cs, rs, is_header)
-            for rr in range(row_idx, row_idx + rs):
-                for cc in range(col, col + cs):
-                    occupied[rr][cc] = True
-            col += cs
+
+    widths = [_row_width(r[0]) for r in rows]
+    raw_max = min(max(widths, default=1) or 1, MAX_TABLE_COLS)
+
+    def _place(target_cols: int):
+        """Place cells into a target-width grid; report last non-empty col."""
+        anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]] = {}
+        occ = [[False] * target_cols for _ in range(n_rows)]
+        last_nonempty = 0
+        for row_idx, (cells, is_header) in enumerate(rows):
+            col = 0
+            for (cell_text, cs, rs) in cells:
+                while col < target_cols and occ[row_idx][col]:
+                    col += 1
+                if col >= target_cols:
+                    break
+                cs = min(max(1, cs), target_cols - col)
+                rs = min(max(1, rs), n_rows - row_idx)
+                anchors[(row_idx, col)] = (cell_text, cs, rs, is_header)
+                for rr in range(row_idx, row_idx + rs):
+                    for cc in range(col, col + cs):
+                        occ[rr][cc] = True
+                if (cell_text or "").strip():
+                    last_nonempty = max(last_nonempty, col + cs)
+                col += cs
+        return anchors, occ, last_nonempty
+
+    # First pass at the widest observed width to learn where real content ends.
+    _a0, _o0, content_extent = _place(raw_max)
+    # Modal width, but never below the real-content extent, never above the cap.
+    modal = Counter(widths).most_common(1)[0][0] if widths else 1
+    max_cols = max(1, min(raw_max, max(modal, content_extent)))
+
+    cell_anchors, occupied, _ = _place(max_cols)
     return max_cols, n_rows, cell_anchors, occupied
 
 
@@ -741,7 +948,11 @@ def render_table(
     rows_xml_parts: List[str] = []
     for row_idx in range(n_rows):
         cells_xml: List[str] = []
+        skip_cols = 0   # columns consumed by a preceding cell's gridSpan
         for col_idx in range(max_cols):
+            if skip_cols > 0:
+                skip_cols -= 1
+                continue
             anchor = cell_anchors.get((row_idx, col_idx))
             if anchor is not None:
                 cell_text, cs, rs, is_header = anchor
@@ -846,26 +1057,41 @@ def render_table(
                 # above is a vMerge anchor; otherwise it's a colspan
                 # continuation covered by the previous cell's gridSpan.
                 above_is_vmerge = False
+                vmerge_cs = 1
                 r = row_idx - 1
                 while r >= 0:
                     if (r, col_idx) in cell_anchors:
                         _t, _cs, _rs, _h = cell_anchors[(r, col_idx)]
                         if _rs > 1 and r + _rs > row_idx:
                             above_is_vmerge = True
+                            vmerge_cs = max(1, _cs)
                         break
                     if not occupied[r][col_idx]:
                         break
                     r -= 1
                 if above_is_vmerge:
+                    # The vMerge anchor may ALSO span columns (rowspan+colspan,
+                    # e.g. a corner header). The continuation cell must repeat
+                    # the SAME gridSpan and consume the spanned continuation
+                    # columns — otherwise this row covers fewer grid columns
+                    # than the others, which makes Word/LibreOffice misalign
+                    # the row and drop trailing cells further down the table.
+                    cont_w_emu = sum(col_w_emus[col_idx:col_idx + vmerge_cs])
+                    span_xml = (
+                        f'<w:gridSpan w:val="{vmerge_cs}"/>'
+                        if vmerge_cs > 1 else ""
+                    )
                     empty_para = build_paragraph_xml("", alignment="center")
                     cells_xml.append(
                         "<w:tc>"
-                        f'<w:tcPr><w:tcW w:w="{col_w_emus[col_idx]}" w:type="dxa"/>'
+                        f'<w:tcPr><w:tcW w:w="{cont_w_emu}" w:type="dxa"/>'
+                        f'{span_xml}'
                         '<w:vMerge w:val="continue"/>'
                         '<w:vAlign w:val="center"/></w:tcPr>'
                         f"{empty_para}"
                         "</w:tc>"
                     )
+                    skip_cols = vmerge_cs - 1   # skip the columns we just spanned
                 # else: skip — covered by previous cell's gridSpan
             else:
                 # No content at this position (uncommon edge case).

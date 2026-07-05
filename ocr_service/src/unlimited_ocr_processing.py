@@ -12,10 +12,12 @@ picture_recovery, layoutjson2md, and json_to_docx (which expect pixel
 bboxes, like DotsOCR produced) keep working.
 """
 
+import asyncio
 import base64
 import logging
 import os
 import re
+import tempfile
 
 from openai import AsyncOpenAI, OpenAI
 from PIL import Image
@@ -269,9 +271,25 @@ def _build_messages(image_path: str) -> list:
 
 
 def _extra_body() -> dict:
+    # No-repeat-ngram params for the DeepseekOCR-style logits processor the
+    # server registers via `--logits_processors ...:NGramPerReqLogitsProcessor`
+    # (see baidu/Unlimited-OCR vLLM recipe). The upstream docs mark this as
+    # REQUIRED: without it long documents can loop on `|det|` coordinate tokens.
+    # window_size follows the model config: 1024 for base, 128 for gundam.
+    ngram_size = int(os.getenv("OCR_NGRAM_SIZE", "35"))
+    ngram_window = int(
+        os.getenv(
+            "OCR_NGRAM_WINDOW",
+            "128" if IMAGE_MODE == "gundam" else "1024",
+        )
+    )
     return {
         "images_config": {"image_mode": IMAGE_MODE},
         "skip_special_tokens": False,
+        "vllm_xargs": {
+            "ngram_size": ngram_size,
+            "window_size": ngram_window,
+        },
     }
 
 
@@ -304,3 +322,137 @@ async def process_image_async(image_path: str) -> list:
         extra_body=_extra_body(),
     )
     return _parse_response(response.choices[0].message.content, img_w, img_h)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Two-pass table refinement
+#
+# The full page is downscaled to the model's image_size (1024) before parsing,
+# so dense merged-cell tables lose the fine detail the model needs to segment
+# them — cells get merged, rows dropped, signatures missed. Re-OCRing JUST the
+# table's cropped region fills that 1024 window with the table alone, restoring
+# the detail. We keep the crop result only when it's structurally BETTER than
+# the first-pass HTML, so a refine can never make a good table worse.
+# Enabled by default; disable with OCR_TABLE_REFINE=0.
+# ───────────────────────────────────────────────────────────────────────────
+
+TABLE_REFINE = os.getenv("OCR_TABLE_REFINE", "1") not in ("0", "false", "False")
+# Skip tiny table crops that already fit comfortably in the model window — the
+# refine only helps when the table occupies a small fraction of the full page.
+_TABLE_REFINE_MIN_AREA_FRAC = float(os.getenv("OCR_TABLE_REFINE_MIN_FRAC", "0.0"))
+
+
+def _table_html_score(html: str) -> tuple:
+    """Structural richness of a table's HTML, higher = more/finer content.
+
+    Returns (n_nonempty_cells, n_rows, -n_merged_megacells). Used only to
+    COMPARE two parses of the same table; a crop is accepted when it scores
+    strictly higher. Rationale:
+      * n_nonempty_cells  — more recovered data (signatures, dropped rows).
+      * n_rows            — dropped rows come back.
+      * -n_merged_megacells — the failure mode is several distinct labels
+        crushed into one cell (e.g. `编制审核批准`); a cell whose text is a
+        run of >=3 short CJK 'label-ish' tokens with no digits/spaces is a
+        strong merge signal, so fewer of them is better.
+    """
+    cells = re.findall(r"<td[^>]*>(.*?)</td>", html, re.S)
+    n_cells = sum(1 for c in cells if c.strip())
+    n_rows = len(re.findall(r"<tr[^>]*>", html))
+    megacells = 0
+    for c in cells:
+        s = c.strip()
+        # crude "merged labels" heuristic: 6+ CJK chars, no digits, no spaces,
+        # no punctuation that would indicate a real sentence.
+        if (len(s) >= 6 and not any(ch.isdigit() for ch in s)
+                and " " not in s and "/" not in s
+                and all("一" <= ch <= "鿿" for ch in s)):
+            megacells += 1
+    return (n_cells, n_rows, -megacells)
+
+
+def _first_table_html(entries: list[dict]) -> str | None:
+    for e in entries:
+        if e.get("category") == "Table" and (e.get("text") or "").strip():
+            return e["text"]
+    return None
+
+
+async def _refine_one_table(
+    full_image, bbox: list[int], sem
+) -> str | None:
+    """Crop `full_image` to `bbox`, re-OCR it, and return the crop's table HTML
+    if it parses to a table. Returns None on any failure (caller keeps the
+    original). Padding gives the model a little context around the rules."""
+    try:
+        W, H = full_image.size
+        x1, y1, x2, y2 = bbox
+        pad = 20
+        crop = full_image.crop((
+            max(0, x1 - pad), max(0, y1 - pad),
+            min(W, x2 + pad), min(H, y2 + pad),
+        ))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            crop.save(tmp.name, "PNG")
+            crop_path = tmp.name
+        try:
+            async with sem:
+                cw, ch = crop.size
+                response = await get_async_client().chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=_build_messages(crop_path),
+                    temperature=0.0,
+                    max_tokens=int(os.getenv("OCR_MAX_TOKENS", "30000")),
+                    extra_body=_extra_body(),
+                )
+            crop_entries = _parse_response(
+                response.choices[0].message.content, cw, ch
+            )
+        finally:
+            os.unlink(crop_path)
+        return _first_table_html(crop_entries)
+    except Exception as exc:  # never let a refine failure break the page
+        log.warning("[ocr] table refine failed: %s", exc)
+        return None
+
+
+async def refine_tables_on_page(page: dict) -> None:
+    """Re-OCR each Table entry's cropped region and swap in the crop's HTML
+    when it is structurally better. Mutates `page['layout_result']` in place.
+    No-op when disabled or when the page has no full-res image / no tables."""
+    if not TABLE_REFINE:
+        return
+    entries = page.get("layout_result") or []
+    full_image = page.get("original_image") or page.get("image")
+    if full_image is None:
+        return
+    tables = [
+        e for e in entries
+        if e.get("category") == "Table" and (e.get("text") or "").strip()
+        and e.get("bbox") and len(e["bbox"]) == 4
+    ]
+    if not tables:
+        return
+
+    page_area = float(max(1, full_image.size[0] * full_image.size[1]))
+    sem = asyncio.Semaphore(int(os.getenv("OCR_TABLE_REFINE_CONCURRENCY", "4")))
+
+    async def _maybe_refine(entry: dict) -> None:
+        b = entry["bbox"]
+        area_frac = max(0, (b[2] - b[0])) * max(0, (b[3] - b[1])) / page_area
+        if area_frac < _TABLE_REFINE_MIN_AREA_FRAC:
+            return
+        crop_html = await _refine_one_table(full_image, b, sem)
+        if not crop_html:
+            return
+        # Guard: keep the crop ONLY if it is strictly richer than the original.
+        if _table_html_score(crop_html) > _table_html_score(entry["text"]):
+            log.info(
+                "[ocr] table refine improved a table on page %s "
+                "(orig %s -> crop %s)",
+                page.get("page_index"),
+                _table_html_score(entry["text"]),
+                _table_html_score(crop_html),
+            )
+            entry["text"] = crop_html
+
+    await asyncio.gather(*(_maybe_refine(e) for e in tables))

@@ -7,10 +7,97 @@ properties, XML escapes, image relationships.
 """
 from __future__ import annotations
 
+import os
+import re
 from io import BytesIO
 from typing import Dict, List, Optional
 
 from docx import Document
+
+# ---------------------------------------------------------------------------
+# East-Asian font handling.
+#
+# Word applies the `w:eastAsia` face to CJK codepoints and `w:ascii`/`w:hAnsi`
+# to Latin ones within the same run. We NEVER override a font the upstream
+# style/size detector supplied — a detected font is used for BOTH slots, so
+# glyph widths (and therefore layout fit) are exactly what the detector sized
+# for. A CJK default is substituted into the eastAsia slot ONLY when:
+#   (a) the run actually contains CJK codepoints, AND
+#   (b) the chosen font is a known Latin-only family that cannot render them
+#       (this is the scanned-input / heuristic-fallback case where no real
+#       font was detected and "Calibri" was filled in as a placeholder).
+# In every other case the detected font is respected verbatim. Choosing the
+# CJK default is language-aware (Chinese / Japanese / Korean) rather than
+# assuming Chinese, so Han glyphs render with the right regional shapes.
+#
+# Per-script defaults are env-overridable per deployment.
+_CJK_DEFAULT_FONTS = {
+    "zh": os.environ.get("DOCX_FONT_ZH", "SimSun"),        # Chinese
+    "ja": os.environ.get("DOCX_FONT_JA", "MS Mincho"),     # Japanese
+    "ko": os.environ.get("DOCX_FONT_KO", "Batang"),        # Korean
+}
+
+# Common Latin-only families that carry no CJK glyphs. When one of these is the
+# active font AND the text has CJK, we add a CJK eastAsia fallback. Matched
+# case-insensitively; extend via DOCX_LATIN_ONLY_FONTS (comma-separated).
+_LATIN_ONLY_FONTS = {
+    "calibri", "calibri light", "arial", "arial narrow", "helvetica",
+    "times new roman", "times", "cambria", "cambria math", "georgia",
+    "verdana", "tahoma", "courier new", "consolas", "segoe ui", "roboto",
+    "open sans", "liberation sans", "liberation serif", "dejavu sans",
+}
+_LATIN_ONLY_FONTS |= {
+    f.strip().lower()
+    for f in os.environ.get("DOCX_LATIN_ONLY_FONTS", "").split(",")
+    if f.strip()
+}
+
+_RE_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")   # Hiragana/Katakana
+_RE_HANGUL = re.compile(r"[\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]")  # Hangul
+_RE_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")     # Han ideographs
+_RE_ANY_CJK = re.compile(
+    r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f"
+    r"\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f"
+    r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
+)
+
+
+def has_cjk(text: str) -> bool:
+    return bool(text) and bool(_RE_ANY_CJK.search(text))
+
+
+def detect_cjk_script(text: str) -> Optional[str]:
+    """Return 'ja' / 'ko' / 'zh' for East-Asian text, else None.
+
+    Order matters: Japanese mixes kana with Han, Korean mixes Hangul with Han,
+    so the presence of kana/Hangul disambiguates from Han-only Chinese.
+    """
+    if not text:
+        return None
+    if _RE_KANA.search(text):
+        return "ja"
+    if _RE_HANGUL.search(text):
+        return "ko"
+    if _RE_HAN.search(text):
+        return "zh"
+    return None
+
+
+def resolve_east_asia_font(font: str, text: str, explicit: Optional[str]) -> str:
+    """Pick the eastAsia face for a run without overriding a detected font.
+
+    - An explicit per-run eastAsia font always wins.
+    - Otherwise the run's own (detected or fallback) `font` is used, so a font
+      the detector chose is respected in both slots.
+    - Only when the text has CJK and `font` is a known Latin-only family do we
+      substitute a language-appropriate CJK default (the no-detection case).
+    """
+    if explicit:
+        return explicit
+    if has_cjk(text) and (font or "").strip().lower() in _LATIN_ONLY_FONTS:
+        script = detect_cjk_script(text)
+        return _CJK_DEFAULT_FONTS.get(script) or font
+    return font
 
 
 # OOXML namespace URIs we need beyond what python-docx already registers.
@@ -82,18 +169,35 @@ def half_points(size_pt) -> int:
 
 
 def build_run_xml(text: str, style: Optional[Dict]) -> str:
-    """A single <w:r> with rPr applied. Multiline text becomes multiple <w:t>
-    runs separated by <w:br/>.
+    """One or more ``<w:r>`` for ``text`` with ``style`` applied.
+
+    - Newlines become soft line breaks (``<w:br/>``).
+    - The Latin face is whatever the detector supplied (fallback: Calibri) and
+      is never overridden. A ``w:eastAsia`` face is added so CJK codepoints
+      render; it defaults to the detected font and only substitutes a
+      language-appropriate CJK font when the detected/fallback font is a
+      Latin-only family that cannot show the CJK present (see
+      ``resolve_east_asia_font``).
+    - Inline LaTeX math (``$...$`` / ``\\(...\\)``) is converted in place:
+      operators/units/Greek to Unicode, ``_{}``/``^{}`` to real sub/superscript
+      runs. Display ``$$...$$`` formulas are handled upstream (formula.py) and
+      never reach here as body text.
     """
     style = style or {}
     font = xml_escape(style.get("font") or "Calibri")
+    east = xml_escape(
+        resolve_east_asia_font(
+            style.get("font") or "Calibri", text or "", style.get("eastasia")
+        )
+    )
     size_hp = half_points(style.get("size") or 11)
     bold = bool(style.get("bold"))
     italic = bool(style.get("italic"))
     color_hex = rgb_hex(style.get("color"))
 
     rpr_parts = [
-        f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/>',
+        f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}"'
+        f' w:eastAsia="{east}" w:cs="{font}"/>',
         f'<w:sz w:val="{size_hp}"/>',
         f'<w:szCs w:val="{size_hp}"/>',
         f'<w:color w:val="{color_hex}"/>',
@@ -104,19 +208,24 @@ def build_run_xml(text: str, style: Optional[Dict]) -> str:
     if italic:
         rpr_parts.append("<w:i/>")
         rpr_parts.append("<w:iCs/>")
-    rpr = "<w:rPr>" + "".join(rpr_parts) + "</w:rPr>"
+    rpr_inner = "".join(rpr_parts)
 
-    # Preserve spaces and convert newlines to soft line breaks.
+    def _make_run(rpr_extra: str, chunk: str) -> str:
+        rpr = "<w:rPr>" + rpr_inner + rpr_extra + "</w:rPr>"
+        body_parts: List[str] = []
+        for i, line in enumerate((chunk or "").split("\n")):
+            if i > 0:
+                body_parts.append("<w:br/>")
+            body_parts.append(
+                f'<w:t xml:space="preserve">{xml_escape(line)}</w:t>'
+            )
+        return f"<w:r>{rpr}{''.join(body_parts)}</w:r>"
+
     text = text or ""
-    body_parts: List[str] = []
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        if i > 0:
-            body_parts.append("<w:br/>")
-        body_parts.append(
-            f'<w:t xml:space="preserve">{xml_escape(line)}</w:t>'
-        )
-    return f"<w:r>{rpr}{''.join(body_parts)}</w:r>"
+    if "$" in text or "\\(" in text:
+        from .latex_inline import build_inline_runs
+        return build_inline_runs(text, rpr_inner, _make_run)
+    return _make_run("", text)
 
 
 def build_paragraph_xml(

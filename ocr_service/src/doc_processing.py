@@ -8,7 +8,8 @@ import fitz  # PyMuPDF
 from PIL import Image
 
 
-PDF_RENDER_ZOOM = 2.0
+PDF_RENDER_DPI = float(os.getenv("PDF_RENDER_DPI", "300"))
+PDF_RENDER_ZOOM = PDF_RENDER_DPI / 72.0
 IMAGE_INPUT_DPI = 96  # treat raw image inputs as if rendered at 96 DPI for page sizing
 
 
@@ -17,7 +18,7 @@ def load_pages_from_pdf(pdf_path: str) -> List[Dict]:
 
     Returns one dict per page:
         {
-          "image":          PIL.Image (RGB, 2x zoom),
+          "image":          PIL.Image (RGB, rendered at PDF_RENDER_ZOOM),
           "page_width_pt":  float,   # original PDF page width in points
           "page_height_pt": float,
           "zoom":           float,   # rasterization zoom (image px = pt * zoom)
@@ -90,8 +91,7 @@ def load_pages_from_image(image_path: str) -> List[Dict]:
     }]
 
 
-# ── Backwards-compatible shims ──────────────────────────────────────────────
-# main.py still imports these names from older code paths and tests.
+# ── Backwards-compatible shims ─
 
 def load_images_from_pdf(pdf_path: str) -> List[Image.Image]:
     return [p["image"] for p in load_pages_from_pdf(pdf_path)]
@@ -162,7 +162,7 @@ def extract_font_spans(pdf_source: Optional[str], page_index: int) -> List[Dict]
     return spans
 
 
-# ── Markdown serializer ─────────────────────────────────────────────────────
+# ── Markdown serializer ────────
 
 def _entries_from_page(page_or_entries) -> List[Dict]:
     """Accept either the legacy list-of-entries shape or the new

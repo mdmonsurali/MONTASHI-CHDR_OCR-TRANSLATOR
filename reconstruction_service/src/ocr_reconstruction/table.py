@@ -233,10 +233,23 @@ def _normalize_column_granularity(
     We fix this BEFORE grid placement so the correction propagates: rows that
     are narrower than the table's full width get their non-empty cells re-spanned
     across the body's canonical column boundaries, absorbing the empty artifact
-    cells. This is a strict no-op for well-formed tables — uniform-width tables,
-    all-``colspan`` tables with nothing under-segmented, and ragged data tables
-    whose short rows have genuine (not artifact) trailing empties are all left
-    byte-identical.
+    cells.
+
+    Crucially the re-span is ROWSPAN-AWARE. A narrow row is not always a full
+    row minus artifacts — it can be a sub-header sitting *under* a ``colspan``
+    header while the outer columns are already covered by ``rowspan`` cells from
+    the row above (e.g. a ``样品组别 / 旋入扭矩 / [失效扭矩 spanning 扭矩值|失效模式] /
+    比值`` header block). There the narrow row's cells belong only in the free
+    middle columns, NOT stretched across the whole width. We therefore place
+    rows top-to-bottom tracking rowspan occupancy, and re-span each narrow row's
+    content cells across only the canonical segments still FREE in that row. If
+    the content-cell count doesn't match the free-segment count, we leave the
+    row untouched rather than guess.
+
+    This is a strict no-op for well-formed tables — uniform-width tables,
+    all-``colspan`` tables with nothing under-segmented, ragged data tables
+    whose short rows have genuine trailing empties, and sub-header rows that
+    already sit correctly under a rowspan block are all left byte-identical.
 
     Returns the SAME ``rows`` object when nothing changed, so callers can detect
     the no-op cheaply.
@@ -272,30 +285,63 @@ def _normalize_column_granularity(
     bounds = sorted(canon)          # e.g. [0, 2, 4, 6]
     n_seg = len(bounds) - 1
 
+    # Track rowspan occupancy exactly as parse_table_grid will: place each row's
+    # (possibly rewritten) cells into a sparse grid so later rows can see which
+    # columns are already taken by a rowspan descending from above.
+    occ = [[False] * maxw for _ in range(len(rows))]
+
     new_rows: List[Tuple[List[Tuple[str, int, int]], bool]] = []
     changed = False
-    for (cells, is_header), w in zip(rows, widths):
-        if w >= maxw:
-            new_rows.append((cells, is_header))
-            continue
-        # Re-span the row's NON-EMPTY cells across the canonical segments,
-        # dropping empty artifact cells. Cell i spans bounds[i]..bounds[i+1];
-        # the last cell extends to maxw so trailing empties are absorbed.
-        content = [(t, rs) for (t, _cs, rs) in cells if (t or "").strip()]
-        if not content or len(content) > n_seg:
-            new_rows.append((cells, is_header))
-            continue
-        rebuilt = []
-        for i, (t, rs) in enumerate(content):
-            b0 = bounds[i]
-            b1 = bounds[i + 1] if i < len(content) - 1 else bounds[-1]
-            rebuilt.append((t, max(1, b1 - b0), rs))
-        # Only accept when the rebuilt row fills the full width and differs.
-        if _row_width(rebuilt) == maxw and rebuilt != list(cells):
-            new_rows.append((rebuilt, is_header))
-            changed = True
-        else:
-            new_rows.append((cells, is_header))
+    for row_idx, ((cells, is_header), w) in enumerate(zip(rows, widths)):
+        emit_cells = cells
+
+        if w < maxw:
+            # Which canonical segments are FREE in this row (no column covered
+            # by a rowspan from above)? A segment must be wholly free to count;
+            # a segment straddling free + occupied columns is ambiguous -> bail.
+            free_segs: List[int] = []
+            straddle = False
+            for si in range(n_seg):
+                cols = range(bounds[si], bounds[si + 1])
+                covered = [occ[row_idx][c] for c in cols]
+                if not any(covered):
+                    free_segs.append(si)
+                elif not all(covered):
+                    straddle = True
+                    break
+
+            if not straddle:
+                content = [
+                    (t, rs) for (t, _cs, rs) in cells if (t or "").strip()
+                ]
+                # Re-span content cells across the free segments, one per
+                # segment. Only when the counts line up exactly — otherwise we
+                # can't unambiguously map cells to segments, so leave as-is.
+                if content and len(content) == len(free_segs):
+                    rebuilt = []
+                    for (t, rs), si in zip(content, free_segs):
+                        b0, b1 = bounds[si], bounds[si + 1]
+                        rebuilt.append((t, max(1, b1 - b0), rs))
+                    if rebuilt != list(cells):
+                        emit_cells = rebuilt
+                        changed = True
+
+        new_rows.append((emit_cells, is_header))
+
+        # Place emit_cells into `occ` (skipping already-occupied columns) so
+        # the rowspans this row starts are visible to subsequent rows.
+        col = 0
+        for (_t, cs, rs) in emit_cells:
+            while col < maxw and occ[row_idx][col]:
+                col += 1
+            if col >= maxw:
+                break
+            cs = min(max(1, cs), maxw - col)
+            rs = min(max(1, rs), len(rows) - row_idx)
+            for rr in range(row_idx, row_idx + rs):
+                for cc in range(col, col + cs):
+                    occ[rr][cc] = True
+            col += cs
 
     return new_rows if changed else rows
 
@@ -611,21 +657,28 @@ def render_table(
     # weight-boosted; then the same map is reused inline below to actually
     # place the picture XML.
     pic_assignments: Dict[Tuple[int, int], List[Dict]] = {}
+    # Per-column minimum width (pt) demanded by any picture assigned to that
+    # column. Zero for text-only columns / picture-free tables.
+    pic_col_min_pt = [0.0] * max_cols
     if pictures_for_table:
         pic_assignments = _assign_pictures_to_cells(
             pictures_for_table, bbox, col_weight, cell_anchors,
             max_cols, n_rows,
         )
+        # A picture column's need is a MINIMUM WIDTH (the fitted image width),
+        # not a proportional weight. Record the widest picture width per column
+        # here and fold it into the per-column floor below. Expressing it as a
+        # weight instead (the old behaviour) let the image column's huge pixel
+        # count dominate the proportional split and squeeze every numeric
+        # column down to a few points.
+        zoom = max(1e-6, float(getattr(ctx, "zoom", 1.0) or 1.0))
         for (_r, c), pics in pic_assignments.items():
             for pic in pics:
                 pb = pic.get("bbox") or []
-                if len(pb) != 4:
+                if len(pb) != 4 or c >= max_cols:
                     continue
-                pic_w_px = max(1.0, pb[2] - pb[0])
-                # ~5 CJK chars per 11pt column ≈ 1 char per 2.2 pt. At
-                # zoom=2 that's 1 char per ~4.4 px.
-                pic_weight = max(1, int(pic_w_px / 4.4))
-                col_weight[c] = max(col_weight[c], pic_weight)
+                pic_w_pt = max(1.0, (pb[2] - pb[0]) / zoom)
+                pic_col_min_pt[c] = max(pic_col_min_pt[c], pic_w_pt)
 
     # Allocate width with a floor per column: a column with a short label
     # like 'P3' still needs enough room for that label, otherwise narrow
@@ -643,6 +696,19 @@ def render_table(
     min_col_cap = max(1, int(w * 0.6 / max_cols))
     floor_per_col = min(min_col_emu_default, min_col_cap)
     min_col_emus = [floor_per_col] * max_cols
+    # Raise the floor of any picture column to the picture's own width (plus a
+    # little padding), so the column is guaranteed wide enough to show the
+    # image at full size without upscaling the whole column out of proportion.
+    # Cap a single picture column at 55% of the table so the data columns keep
+    # a usable share.
+    if any(pic_col_min_pt):
+        pic_col_cap_emu = int(round(w * 0.55))
+        for c in range(max_cols):
+            if pic_col_min_pt[c] > 0:
+                need_emu = int(round((pic_col_min_pt[c] + 4.0) * EMU_PER_PT))
+                min_col_emus[c] = max(
+                    min_col_emus[c], min(need_emu, pic_col_cap_emu)
+                )
 
     total_weight = sum(col_weight) or max_cols
     raw_emus = [
@@ -735,8 +801,101 @@ def render_table(
     row_h_pts = [
         (bbox_h_pt * rl / weight_sum) for rl in row_lines_arr
     ]
-    min_row_pt = natural_h_px * 1.06
-    row_h_pts = [max(rh, min_row_pt) for rh in row_h_pts]
+    # Floor each row by ITS OWN line count, not a flat one-line minimum —
+    # otherwise a row that wraps to 2+ lines (long text, narrow column) can be
+    # squeezed by the proportional bbox split down to one line's height, and
+    # since rows are emitted with hRule="exact" (hard clip, no autofit), the
+    # extra line(s) render past the row border and get visually clipped by
+    # the next row's border line.
+    line_h_pt = natural_h_px * 1.06
+    row_h_pts = [
+        max(rh, line_h_pt * rl) for rh, rl in zip(row_h_pts, row_lines_arr)
+    ]
+
+    # Reserve vertical room for pictures. A picture cell (often a rowspan block
+    # holding one or more stacked illustrations) needs its merged height to be
+    # at least the SUM of its pictures' fitted heights, else the images spill
+    # past the cell border (rows use hRule="exact", a hard clip). We compute
+    # each picture's height when scaled to the cell's column width, add a small
+    # per-picture pad, and if the anchor's rowspan rows don't already provide
+    # that much height, grow those rows evenly to cover the deficit. Text-only
+    # cells and picture-free tables are untouched.
+    #
+    # Per-row minimum kept for the bbox re-fit below: a row must never shrink
+    # below its own text line count, otherwise text clips.
+    row_min_pts = [line_h_pt * rl for rl in row_lines_arr]
+    # Height (EMU) each picture cell reserves for its images, so the per-cell
+    # text fit below can subtract it and fit the label into the space above.
+    _pic_reserve_emu_by_cell: Dict[Tuple[int, int], int] = {}
+    if pic_assignments:
+        pic_pad_pt = 3.0
+        for (a_r, a_c), pics in pic_assignments.items():
+            anchor = cell_anchors.get((a_r, a_c))
+            if not anchor:
+                continue
+            _t, a_cs, a_rs, _h = anchor
+            col_w_pt = sum(
+                col_w_emus[a_c:a_c + max(1, a_cs)]
+            ) / EMU_PER_PT
+            avail_w_pt = max(1.0, col_w_pt - 4.0)   # ~2pt padding each side
+            need_pt = 0.0
+            for pic in pics:
+                pb = pic.get("bbox") or []
+                if len(pb) != 4 or pb[2] <= pb[0] or pb[3] <= pb[1]:
+                    continue
+                iw_pt = (pb[2] - pb[0]) / ctx.zoom
+                ih_pt = (pb[3] - pb[1]) / ctx.zoom
+                # height once the picture is scaled down to fit the column
+                # width (never upscaled)
+                scale = min(1.0, avail_w_pt / max(1.0, iw_pt))
+                need_pt += ih_pt * scale + pic_pad_pt
+            _pic_reserve_emu_by_cell[(a_r, a_c)] = int(
+                round(need_pt * EMU_PER_PT)
+            )
+            span = list(range(a_r, min(n_rows, a_r + max(1, a_rs))))
+            have_pt = sum(row_h_pts[r] for r in span)
+            deficit = need_pt - have_pt
+            if deficit > 0:
+                add = deficit / len(span)
+                for r in span:
+                    row_h_pts[r] += add
+                    # A picture row's minimum is now the taller of its text
+                    # floor and its share of the picture demand, so the bbox
+                    # re-fit below can't squeeze the image back out.
+                    row_min_pts[r] = max(row_min_pts[r], row_h_pts[r])
+
+    # Keep the table inside its source bbox height. Growing rows for pictures
+    # (or wrapped text) can push the total past the bbox; because the table
+    # lives in a fixed-height anchored textbox (noAutofit), any overflow is
+    # hard-clipped — which drops the bottom rows and can also overlap whatever
+    # sits just below the table on the page. So if we're over budget, reclaim
+    # the excess from rows that have slack ABOVE their minimum, proportionally,
+    # leaving every row at least its minimum (text + any picture share). If the
+    # minimums themselves already exceed the bbox (a genuinely oversized table),
+    # scale everything down uniformly so all rows stay visible and none clip.
+    total_pt = sum(row_h_pts)
+    if total_pt > bbox_h_pt + 0.5:
+        min_total = sum(row_min_pts)
+        if min_total <= bbox_h_pt:
+            excess = total_pt - bbox_h_pt
+            for _ in range(8):
+                slack = [rh - mn for rh, mn in zip(row_h_pts, row_min_pts)]
+                slack_total = sum(s for s in slack if s > 0)
+                if slack_total <= 1e-6 or excess <= 0.5:
+                    break
+                new_h = []
+                for rh, s in zip(row_h_pts, slack):
+                    if s <= 0:
+                        new_h.append(rh)
+                        continue
+                    take = min(s, excess * s / slack_total)
+                    new_h.append(rh - take)
+                excess = sum(new_h) - bbox_h_pt
+                row_h_pts = new_h
+        else:
+            # Even the minimums don't fit — scale uniformly so nothing clips.
+            scale = bbox_h_pt / total_pt
+            row_h_pts = [rh * scale for rh in row_h_pts]
 
     # Picture placement reuses the cell assignment already computed above
     # (the same one that fed into col_weight). Recomputing here from final
@@ -759,16 +918,6 @@ def render_table(
             if anchor is not None:
                 cell_text, cs, rs, is_header = anchor
                 cell_w_emu = sum(col_w_emus[col_idx:col_idx + cs])
-                cell_style = dict(style)
-                cell_style["size"] = cell_size_pt
-                if is_header or row_idx == 0:
-                    cell_style["bold"] = True
-                run_xml = build_run_xml(cell_text, cell_style)
-                # Tables are universally centered in the source docs we see
-                # (engineering reports, risk matrices, parts lists). Center
-                # horizontally + vertically so cells read consistently and a
-                # short value in a wide column isn't pinned to the left edge.
-                para_xml = build_paragraph_xml(run_xml, alignment="center")
                 pics_here = pic_inline_by_cell.get((row_idx, col_idx)) or []
                 pic_paragraphs = []
                 cell_h_emu = int(round(row_h_pts[row_idx] * EMU_PER_PT))
@@ -777,6 +926,48 @@ def render_table(
                         int(round(row_h_pts[row_idx + dr] * EMU_PER_PT))
                         for dr in range(rs)
                     )
+
+                # Per-cell fit so text is FULLY VISIBLE. Each cell is re-fitted
+                # against its final (cell_w x cell_h). The base size is the
+                # table-wide cap `cell_size_pt` (from the narrowest column);
+                # `fit_multiline` shrinks further inside that budget and
+                # truncates with `…` when even the floor doesn't fit, so cell
+                # content never overflows the fixed row height (`hRule="exact"`).
+                # When the cell also holds pictures, fit the text into the space
+                # left ABOVE them so text and image don't collide.
+                cell_w_pt_for_fit = cell_w_emu / EMU_PER_PT
+                cell_h_pt_for_fit = cell_h_emu / EMU_PER_PT
+                if any(p.get("image_obj") for p in pics_here):
+                    reserve_pt = (
+                        _pic_reserve_emu_by_cell.get((row_idx, col_idx), 0)
+                        / EMU_PER_PT
+                    )
+                    one_line_pt = natural_h_px * 1.06
+                    cell_h_pt_for_fit = max(
+                        one_line_pt, cell_h_pt_for_fit - reserve_pt,
+                    )
+                fitted_cell_pt, fitted_cell_lines = fit_multiline(
+                    cell_text,
+                    max(1.0, cell_w_pt_for_fit),
+                    max(1.0, cell_h_pt_for_fit),
+                    max_size_pt=cell_size_pt,
+                )
+                cell_style = dict(style)
+                cell_style["size"] = (
+                    fitted_cell_pt if cell_text else cell_size_pt
+                )
+                if is_header or row_idx == 0:
+                    cell_style["bold"] = True
+                rendered_cell_text = (
+                    "\n".join(fitted_cell_lines)
+                    if fitted_cell_lines else cell_text
+                )
+                run_xml = build_run_xml(rendered_cell_text, cell_style)
+                # Tables are universally centered in the source docs we see
+                # (engineering reports, risk matrices, parts lists). Center
+                # horizontally + vertically so cells read consistently and a
+                # short value in a wide column isn't pinned to the left edge.
+                para_xml = build_paragraph_xml(run_xml, alignment="center")
                 text_reserve_emu = (
                     int(round(natural_h_px * 1.06 * EMU_PER_PT))
                     if cell_text else 0
@@ -799,10 +990,29 @@ def render_table(
                     iw, ih = img_obj.size
                     if iw <= 0 or ih <= 0:
                         continue
-                    # 1 px → 1 pt → EMU_PER_PT EMU (matches the 72-dpi
-                    # assumption used everywhere else for bbox math).
-                    intrinsic_w_emu = iw * EMU_PER_PT
-                    intrinsic_h_emu = ih * EMU_PER_PT
+                    # Intrinsic size in the SAME point space as the cell: the
+                    # crop pixels are rendered at ctx.zoom (a 2x page raster is
+                    # typical), so divide by zoom to get the picture's true
+                    # physical size — exactly what render_standalone_picture
+                    # does via bbox_px_to_emu. Prefer the picture's own bbox
+                    # when present (already the source-accurate extent); fall
+                    # back to the crop pixel dims / zoom. Treating the raw crop
+                    # pixels as points made every table image ~zoom-times too
+                    # big, so it filled the whole column width and overflowed
+                    # the cell height regardless of the fit clamp below.
+                    zoom = max(1e-6, float(getattr(ctx, "zoom", 1.0) or 1.0))
+                    pb = pic.get("bbox") or []
+                    if len(pb) == 4 and pb[2] > pb[0] and pb[3] > pb[1]:
+                        intrinsic_w_pt = (pb[2] - pb[0]) / zoom
+                        intrinsic_h_pt = (pb[3] - pb[1]) / zoom
+                    else:
+                        intrinsic_w_pt = iw / zoom
+                        intrinsic_h_pt = ih / zoom
+                    intrinsic_w_emu = max(1.0, intrinsic_w_pt * EMU_PER_PT)
+                    intrinsic_h_emu = max(1.0, intrinsic_h_pt * EMU_PER_PT)
+                    # Fit inside the cell: never wider than the padded column,
+                    # never taller than this picture's share of the cell height,
+                    # and never upscale past the source size.
                     scale_w = max_pic_w_emu / intrinsic_w_emu
                     scale_h = per_pic_h_emu / intrinsic_h_emu
                     scale = min(1.0, scale_w, scale_h)

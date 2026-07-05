@@ -44,7 +44,7 @@ from doc_processing import (
     load_pages_from_pdf,
 )
 from ocr_reconstruction import json_to_docx, process_pictures
-from unlimited_ocr_processing import process_image_async
+from unlimited_ocr_processing import process_image_async, refine_tables_on_page
 from font_attribution import attribute_page
 from picture_recovery import recover_missing_pictures
 
@@ -208,12 +208,21 @@ async def _ocr_one_page_async(page_meta: dict, sem: asyncio.Semaphore) -> dict:
                 layout = []
     finally:
         os.unlink(tmp_path)
-    return {
+    page = {
         **page_meta,
         "original_image": img,
         "layout_result": layout,
         "markdown_content": "",
     }
+    # Second pass: re-OCR each detected table from its high-res crop and swap in
+    # the result when it is structurally richer (recovers merged labels / dropped
+    # rows the downscaled full-page pass lost). Guarded + best-effort, so it can
+    # never make a table worse or fail the page. No-op when OCR_TABLE_REFINE=0.
+    try:
+        await refine_tables_on_page(page)
+    except Exception as exc:
+        log.warning("[ocr] table refine pass skipped: %s", exc)
+    return page
 
 
 async def _ocr_pages_concurrently(pages_meta: List[dict], batch_size: int) -> List[dict]:

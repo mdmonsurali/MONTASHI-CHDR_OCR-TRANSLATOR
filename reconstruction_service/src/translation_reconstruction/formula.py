@@ -65,8 +65,9 @@ def create_formula_image(
     text at its rendered size and avoids surrounding it with the big
     whitespace canvas that a bbox-aspect figsize would produce.
 
-    When ``bold=True``: pdflatex output uses ``\\mathversion{bold}``;
-    matplotlib fallback uses ``fontweight="bold"`` and the bolder
+    When ``bold=True``: pdflatex output uses ``\\mathversion{bold}`` so
+    every glyph (letters, digits, ``\\frac``, ``\\sqrt``, etc.) is rendered
+    in bold; matplotlib fallback uses ``fontweight="bold"`` and the bolder
     ``dejavuserif`` math font.
 
     ``target_width_pt``: when provided (matplotlib fallback only), the
@@ -111,9 +112,14 @@ def create_formula_image(
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 tex_file = os.path.join(tmpdir, "formula.tex")
-                # \mathversion{bold} bolds every glyph in math mode globally
-                # (including \frac, \sqrt, etc.).
+                # \mathversion{bold} swaps in the bold math font for every
+                # glyph inside the formula — including \frac, \sqrt, etc.,
+                # not just variables. Cleaner than per-token \boldsymbol
+                # since the OCR text isn't always token-clean.
                 math_version = "\\mathversion{bold}" if bold else ""
+                # standalone's `varwidth` option respects \fontsize so we
+                # can scale the formula to the caller's requested point
+                # size. Line skip = 1.2 × fontsize is LaTeX's standard.
                 font_pt = max(6, int(fontsize))
                 line_pt = int(round(font_pt * 1.2))
                 with open(tex_file, "w") as f:
@@ -164,10 +170,17 @@ def create_formula_image(
     # tofu boxes. Splitting first preserves math layout AND renders text in
     # the right script.
     try:
-        # See `_wrap_parts` for the wrapping rationale: keeps mixed CJK+math
-        # paragraphs from rendering as one 50:1-wide strip.
+        # When the caller passed a target width, wrap the renderable string
+        # into multiple lines whose visual width fits inside that width.
+        # Wrapping happens between text/math segments (the boundaries that
+        # `_build_renderable_string` already produces) so we never split a
+        # math atom or an ideograph mid-glyph. If no target width is given,
+        # the whole formula lives on one line — same behaviour as before.
         parts = _build_renderable_parts(clean)
         rendered = _wrap_parts(parts, fontsize, target_width_pt)
+        # Sizing the figure width to the target keeps the rendered PNG
+        # aspect ratio close to the destination bbox. Height is generous
+        # so `bbox_inches="tight"` can crop to the ink extent.
         if target_width_pt and target_width_pt > 0:
             fig_w = max(2.0, target_width_pt / 72.0)
         else:
@@ -237,8 +250,11 @@ def _build_renderable_parts(latex: str) -> list[str]:
     for m in _TEXT_RE.finditer(latex):
         rewritten_parts.append(latex[pos:m.start()])
         if _is_text_command_at_brace_depth_zero(latex, m.start()):
+            # Keep verbatim — second pass will hoist this top-level \text
+            # out so its body renders via the regular text path.
             rewritten_parts.append(m.group(0))
         else:
+            # Nested: substitute \mathrm{...} so mathtext can parse it.
             rewritten_parts.append(f"\\mathrm{{{m.group(1)}}}")
         pos = m.end()
     rewritten_parts.append(latex[pos:])
@@ -262,27 +278,38 @@ def _build_renderable_parts(latex: str) -> list[str]:
 
 
 def _build_renderable_string(latex: str) -> str:
-    """Concatenated form of `_build_renderable_parts`."""
+    """Concatenated form of `_build_renderable_parts` — kept for callers
+    that expect the pre-refactor single-string output."""
     return "".join(_build_renderable_parts(latex))
 
 
 # Rough width in points of one "average" glyph at fontsize 1pt. Used to
-# estimate line width for the wrap heuristic. See ocr_reconstruction/formula.py
-# for calibration notes.
+# estimate line width for the wrap heuristic. CJK ideographs are ~1em wide
+# (matches this constant), Latin letters average ~0.5em; we pick a middle
+# ground so mixed-script lines break at roughly the target bbox width.
 _APPROX_CHAR_WIDTH_PER_PT = 0.55
 
 
 def _wrap_parts(parts: list[str], fontsize: int, target_width_pt: Optional[float]) -> str:
-    """Wrap fragment list into multiple lines so no line exceeds
-    `target_width_pt`. Wrapping happens only at fragment boundaries — never
-    inside a math atom or `\\text{...}` body. No-op when target_width_pt
-    is None."""
+    """Insert `\\n` between renderable fragments so no line exceeds the
+    target width. Wrapping happens only at fragment boundaries — never
+    inside a `$...$` math atom (which mathtext must parse as one token)
+    and never inside a `\\text{...}` body (which would break the
+    ideograph run).
+
+    When `target_width_pt` is None, this is a no-op join — the whole
+    formula lives on one line, preserving the legacy behaviour."""
     if not target_width_pt or target_width_pt <= 0:
         return "".join(parts)
     max_line_chars = max(4, int(target_width_pt / (fontsize * _APPROX_CHAR_WIDTH_PER_PT)))
     lines: list[str] = []
     current = ""
     for part in parts:
+        # Rough visible-length estimate: math fragments count as their
+        # atom count (drop the `$` delimiters), text fragments count as
+        # their character length. Ideographs and Latin chars both count
+        # as 1 — the coefficient in `max_line_chars` was calibrated for
+        # this simplification.
         visible = part[1:-1] if part.startswith("$") and part.endswith("$") else part
         if current and len(current) + len(visible) > max_line_chars:
             lines.append(current)
@@ -369,8 +396,8 @@ def render_formula(ctx, entry: Dict) -> None:
         target_pt = 11.0
 
     # Operator-configurable size boost + bold. Defaults give a clearly
-    # larger and bolder formula than the surrounding text. Override per
-    # deployment via env.
+    # larger and bolder formula than the surrounding text — most documents
+    # want formulas to stand out, not blend in. Override per-deployment.
     try:
         size_multiplier = float(os.environ.get("FORMULA_SIZE_MULTIPLIER", "1.6"))
     except (TypeError, ValueError):
@@ -383,13 +410,17 @@ def render_formula(ctx, entry: Dict) -> None:
 
     # Pass the destination bbox width so the matplotlib fallback wraps
     # mixed-content formulas (CJK prose + inline math) to roughly match the
-    # bbox aspect ratio.
+    # bbox aspect ratio. Without this, a paragraph-Formula on page 7 of
+    # CH3.5.07 rendered as one 52:1-wide strip that then shrank to ~4pt
+    # when scaled to fit the bbox.
     target_width_pt = bbox_w_emu / EMU_PER_PT if bbox_w_emu > 0 else None
     img_buf = create_formula_image(
         text, fontsize=int(round(target_pt)), bold=bold,
         target_width_pt=target_width_pt,
     )
     if img_buf is None:
+        # Text fallback when image generation fails. Honour the same
+        # size + bold knobs so the formula still stands out.
         fallback_style = {
             **style, "font": "Cambria Math",
             "size": target_pt,

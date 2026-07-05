@@ -62,7 +62,9 @@ CMD ["\
          --gpu-memory-utilization $GPU_MEM_UTIL \
          --max-model-len $MAX_MODEL_LEN \
          --max-num-seqs $VLLM_MAX_NUM_SEQS \
-         --enable-prefix-caching \
+         --logits-processors vllm.model_executor.models.unlimited_ocr:NGramPerReqLogitsProcessor \
+         --no-enable-prefix-caching \
+         --mm-processor-cache-gb 0 \
          --chat-template-content-format string \
          --served-model-name $OCR_MODEL_NAME \
          --trust-remote-code \

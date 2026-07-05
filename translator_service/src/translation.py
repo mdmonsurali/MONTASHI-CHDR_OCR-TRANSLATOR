@@ -25,12 +25,16 @@ _ENTRY_SEP = "<<<ENTRY_SEP>>>"
 # Plain-prose categories: the whole `text` field is translated as-is.
 TRANSLATABLE_CATEGORIES = {
     "Text", "Title", "Page-header", "Page-footer", "Section-header",
-    "Caption", "List-item",
+    "Caption", "List-item", "Footnote",
 }
 # Categories needing structure-aware handling (HTML / LaTeX): only the
 # human-readable substrings are translated, markup is preserved verbatim.
 TABLE_CATEGORIES = {"Table"}
 FORMULA_CATEGORIES = {"Formula"}
+# Categories whose text is NOT translated (they carry no natural-language
+# prose). Everything else — including any future/unknown category the OCR
+# emits — is treated as plain prose so nothing slips through untranslated.
+NON_TEXT_CATEGORIES = {"Picture"}
 # Set TRANSLATE_FORMULA_TEXT=false to leave formulas 100% untouched.
 TRANSLATE_FORMULA_TEXT = os.getenv("TRANSLATE_FORMULA_TEXT", "true").lower() == "true"
 
@@ -255,17 +259,25 @@ def _collect_units(layout: List[dict]
             if not isinstance(text, str) or not text.strip():
                 continue
 
-            if cat in TRANSLATABLE_CATEGORIES:
+            if cat in TABLE_CATEGORIES:
+                _add_table_units(entry, units, finalizers)
+
+            elif cat in FORMULA_CATEGORIES:
+                if TRANSLATE_FORMULA_TEXT:
+                    _add_formula_units(entry, units, finalizers)
+
+            elif cat in NON_TEXT_CATEGORIES:
+                continue                       # no natural-language text
+
+            else:
+                # Plain-prose default: every remaining category (the known
+                # TRANSLATABLE_CATEGORIES *and* any future/unknown category the
+                # OCR starts emitting) has its whole `text` translated, so
+                # nothing carrying prose is ever silently skipped.
                 if _worth_translating(text):
                     def _writer(value: str, _e=entry) -> None:
                         _e["text"] = value
                     units.append(_Unit(text, _writer))
-
-            elif cat in TABLE_CATEGORIES:
-                _add_table_units(entry, units, finalizers)
-
-            elif cat in FORMULA_CATEGORIES and TRANSLATE_FORMULA_TEXT:
-                _add_formula_units(entry, units, finalizers)
 
     return units, finalizers
 

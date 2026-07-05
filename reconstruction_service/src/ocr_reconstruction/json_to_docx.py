@@ -16,55 +16,10 @@ from .picture import render_standalone_picture
 from .table import (
     render_table, parse_html_table_rows, parse_markdown_table,
     parse_table_grid, compute_col_weights,
-)
+) #deduplicate_entries,
 from .formula import render_formula
 from .text_entry import render_text_entry
 from .shape_context import ShapeContext
-
-
-def _dedup_overlapping_entries(entries: List[Dict]) -> List[Dict]:
-    """Drop near-duplicate entries that would render on top of each other.
-
-    Some OCR outputs emit the same region twice with bboxes differing by a
-    pixel or two (e.g. a page detected in overlapping tiles). Rendered as-is
-    this doubles every glyph, producing a smeared "bold"/ghosted look. We keep
-    the first of any group whose entries share a category, have near-identical
-    text, and whose bounding boxes overlap heavily (IoU > 0.6). This is generic
-    de-duplication — it never merges entries that differ in content or sit in
-    different places, so distinct same-text labels are preserved.
-    """
-    def _iou(a, b) -> float:
-        if not a or not b or len(a) != 4 or len(b) != 4:
-            return 0.0
-        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
-        ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
-        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
-        inter = iw * ih
-        if inter <= 0:
-            return 0.0
-        area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
-        area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
-        union = area_a + area_b - inter
-        return inter / union if union > 0 else 0.0
-
-    kept: List[Dict] = []
-    for e in entries:
-        cat = e.get("category")
-        txt = (e.get("text") or "").strip()
-        bbox = e.get("bbox") or []
-        is_dup = False
-        for k in kept:
-            if k.get("category") != cat:
-                continue
-            if (k.get("text") or "").strip() != txt:
-                continue
-            # Pictures have no text; only dedup them when clearly co-located.
-            if _iou(k.get("bbox") or [], bbox) > 0.6:
-                is_dup = True
-                break
-        if not is_dup:
-            kept.append(e)
-    return kept
 
 
 def _parse_table_entry_rows(entry: Dict):
@@ -229,7 +184,12 @@ def json_to_docx(layout_results, output_path="output.docx"):
             raw_entries = raw_page
 
         entries = page["entries"] or raw_entries
-        entries = _dedup_overlapping_entries(entries)
+
+        # Remove duplicate / heavily-overlapping entries produced by the OCR
+        # pipeline (same region detected twice, or VLM hallucinating multiple
+        # interpretations of the same table). Uses IoU >= 0.85 + same category;
+        # keeps whichever duplicate has the richer text content.
+        #entries = deduplicate_entries(entries)
 
         # Page-header / Page-footer entries are rendered as positioned
         # floating textboxes inside the body (same path as Text/Title/etc.)
