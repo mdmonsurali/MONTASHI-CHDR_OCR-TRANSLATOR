@@ -91,7 +91,12 @@ def create_formula_image(
     clean = re.sub(r"\}\s+\{", "}{", clean)
     # Fill empty `{}` so commands like `\frac{}{x}` get a placeholder. Empty
     # args raise the same mathtext ParseSyntaxException as missing braces.
-    clean = re.sub(r"\{\s*\}", r"{\\,}", clean)
+    # BUT NOT when the empty group is immediately followed by `^`/`_`: that is
+    # the `{}^{\circ}` / `{}_{n}` prescript idiom (very common for the degree
+    # sign `{}^{\circ}\mathrm{C}` = °C). mathtext parses `{}^{...}` fine but
+    # chokes on `{\,}^{...}` ("Expected end of text"), which made the WHOLE
+    # formula fall back to rendering raw LaTeX source. Leave those `{}` intact.
+    clean = re.sub(r"\{\s*\}(?![\^_])", r"{\\,}", clean)
     if not clean:
         return None
 

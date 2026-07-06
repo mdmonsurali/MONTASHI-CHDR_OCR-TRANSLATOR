@@ -217,6 +217,56 @@ def _longest_token_width(s: str) -> int:
     return best
 
 
+# A short "label" (header, code, category) should sit on at most this many
+# lines instead of collapsing into a tall vertical strip.
+_LABEL_MAX_LINES = 2
+# Cells at/under this display width are treated as labels (headers / short
+# values). ~16 display units ≈ 8 CJK glyphs.
+_LABEL_MAX_DISPLAY_WIDTH = 16
+# NO cell — however long — should be forced to wrap to more than this many
+# lines. Beyond this a cell reads as a 1-glyph-per-line vertical strip and
+# clips. A long paragraph cell therefore demands at least
+# ceil(display_width / _CELL_MAX_LINES) width from its column.
+_CELL_MAX_LINES = 16
+# But a single cell's demand is capped here (display units) so one very long
+# paragraph can't claim more than a fair slice; the column's proportional
+# weight (75th percentile) covers the rest, and the redistribution loop
+# balances against the other columns.
+_CELL_MIN_WIDTH_CAP = 22
+
+
+def _content_min_width(s: str) -> int:
+    """Content-aware minimum column width (in display units) for cell text `s`.
+
+    Unlike `_longest_token_width` (which is ~1 for pure CJK because CJK breaks
+    between glyphs, leaving CJK columns freely squeezable), this returns a width
+    that stops a cell from wrapping into a tall vertical strip:
+      * a SHORT label (≤ _LABEL_MAX_DISPLAY_WIDTH) should fit on
+        ≤ _LABEL_MAX_LINES lines → needs ceil(D / _LABEL_MAX_LINES);
+      * a LONG paragraph should still not exceed _CELL_MAX_LINES lines →
+        needs ceil(D / _CELL_MAX_LINES), capped at _CELL_MIN_WIDTH_CAP so a
+        lone huge cell can't claim the whole table.
+    The max over the cell's newline-separated segments is returned.
+    """
+    if not s or not s.strip():
+        return 0
+    best = 0
+    for seg in s.split("\n"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        dw = _display_width(seg)
+        if dw <= _LABEL_MAX_DISPLAY_WIDTH:
+            need = -(-dw // _LABEL_MAX_LINES)          # short label: ≤2 lines
+        else:
+            need = min(
+                _CELL_MIN_WIDTH_CAP, -(-dw // _CELL_MAX_LINES)  # long: ≤16 lines
+            )
+        if need > best:
+            best = need
+    return best
+
+
 def _normalize_column_granularity(
     rows: List[Tuple[List[Tuple[str, int, int]], bool]],
 ) -> List[Tuple[List[Tuple[str, int, int]], bool]]:
@@ -611,26 +661,68 @@ def compute_col_weights(
 ) -> List[int]:
     """Per-column weights inferred from cell text.
 
-    Two signals combine: `_display_width` (full content length, drives the
-    'bigger column for more text' bias) and `_longest_token_width` (longest
-    unbreakable Latin/digit run, which sets a floor so a column holding a
-    long word/code doesn't get squeezed below that word's width).
+    A column's soft weight is a HIGH PERCENTILE (75th) of its cells' width
+    contributions — not the max, and not the median. The max let a single
+    outlier cell (one long ``H1, H2, … H15`` list among empty cells) blow a
+    column out. The median under-serves the common real case where a column is
+    short in MOST rows yet holds long paragraphs in several rows (e.g. a
+    '特征判定' answer column: many '否'/'固定。' plus a few 60-180 char answers) —
+    its median is ~one glyph, so it was squeezed to a 1-glyph-per-line vertical
+    strip and its long cells clipped. The 75th percentile gives such a column
+    enough width for its long cells while ignoring a lone outlier and empty
+    placeholder cells. A hard floor from the longest unbreakable token AND a
+    content-aware label minimum are still applied per column (via max) so no
+    column is squeezed below what it needs.
     """
-    col_weight = [1] * max_cols
+    contribs: List[List[int]] = [[] for _ in range(max_cols)]
     col_min = [1] * max_cols
     for (_r, c), (txt, cs, _rs, _h) in cell_anchors.items():
+        if c >= max_cols:
+            continue
+        cs = max(1, min(cs, max_cols - c))
+        # Per-column floor = the larger of the longest unbreakable Latin/digit
+        # token and the content-aware label minimum. The latter keeps short CJK
+        # label columns (headers like '可能的危险(源)') from being squeezed so
+        # narrow they wrap into a 1-glyph-per-line vertical strip and clip.
         if cs == 1:
-            col_weight[c] = max(col_weight[c], _display_width(txt))
-            col_min[c] = max(col_min[c], _longest_token_width(txt))
+            contribs[c].append(_display_width(txt))
+            col_min[c] = max(
+                col_min[c], _longest_token_width(txt), _content_min_width(txt)
+            )
         else:
             share = max(1, _display_width(txt) // cs)
             tok_share = max(1, _longest_token_width(txt) // cs)
+            content_share = max(1, _content_min_width(txt) // cs)
             for cc in range(c, c + cs):
-                col_weight[cc] = max(col_weight[cc], share)
-                col_min[cc] = max(col_min[cc], tok_share)
-    # Lift each column's weight so the longest-unbreakable token always
-    # has at least that much weight — keeps narrow-but-text-bearing columns
-    # readable (e.g. an 'N/ACC' column was being squeezed to ~5mm).
+                contribs[cc].append(share)
+                col_min[cc] = max(col_min[cc], tok_share, content_share)
+
+    def _percentile(vals: List[int], q: float) -> float:
+        """Linear-interpolated q-quantile (0..1) of a non-empty list."""
+        s = sorted(vals)
+        if len(s) == 1:
+            return float(s[0])
+        import math
+        k = (len(s) - 1) * q
+        lo = math.floor(k)
+        hi = math.ceil(k)
+        if lo == hi:
+            return float(s[int(k)])
+        return s[lo] * (hi - k) + s[hi] * (k - lo)
+
+    col_weight = []
+    for c in range(max_cols):
+        # 75th percentile of the non-trivial contributions: wide enough for a
+        # column that is long in a MINORITY of rows (its long cells fit without
+        # a vertical strip), while empty placeholders and a single outlier
+        # don't distort it.
+        nontrivial = [v for v in contribs[c] if v > 1]
+        col_weight.append(
+            max(1, int(round(_percentile(nontrivial, 0.75)))) if nontrivial else 1
+        )
+
+    # Lift each column to its longest-unbreakable-token floor so narrow-but-
+    # text-bearing columns (e.g. an 'N/ACC' column) stay readable.
     return [max(w, m) for w, m in zip(col_weight, col_min)]
 
 
@@ -761,20 +853,31 @@ def render_table(
         fitted, lines = fit_multiline(
             text, box_w_pt, box_h_pt, max_size_pt=base_size_pt,
         )
-        if fitted < base_size_pt:
-            t_style["size"] = fitted
         line_pt = None
         render_text = text
-        if lines:
-            render_text = "\n".join(lines)
-            if len(lines) >= 2:
-                line_pt = box_h_pt / len(lines)
+        # `lines is None` → doesn't fit even at the floor. Wrap the full text at
+        # the floor and let the box grow (spAutoFit) instead of clipping.
+        fallback_auto_fit = lines is None
+        if lines is None:
+            t_style["size"] = min(base_size_pt, 6.0)
+            _f = get_font(max(1, int(round(6.0))))
+            render_text = (
+                "\n".join(wrap_to_width(text, _f, box_w_pt * 0.93, int(round(6.0))))
+                if _f is not None else text
+            )
+        else:
+            if fitted < base_size_pt:
+                t_style["size"] = fitted
+            if lines:
+                render_text = "\n".join(lines)
+                if len(lines) >= 2:
+                    line_pt = box_h_pt / len(lines)
         runs_xml = build_run_xml(render_text, t_style)
         para_xml = build_paragraph_xml(runs_xml, line_pt=line_pt)
         ctx.xml_chunks.append(
             build_anchored_textbox_xml(
                 x, y, w, h, para_xml, ctx._next_id(),
-                body_auto_fit=False,
+                body_auto_fit=fallback_auto_fit,
             )
         )
         return
@@ -842,6 +945,33 @@ def render_table(
     floor_per_col = min(min_col_emu_default, min_col_cap)
     min_col_emus = [floor_per_col] * max_cols
 
+    # Per-column CONTENT-AWARE floor: a short-label column (e.g. a CJK header
+    # like '可能的危险(源)') must be wide enough that its label wraps to at most
+    # ~2 lines instead of collapsing into a 1-glyph-per-line vertical strip that
+    # then clips. Compute each column's content-min in DISPLAY units, convert to
+    # pt at roughly half the declared glyph advance per display unit (1 CJK glyph
+    # = 2 display units ≈ declared_size_pt wide), and fold it into the floor.
+    # Each such floor is individually capped so one column can't eat the table;
+    # the redistribution loop below steals the extra width from long-text columns.
+    pt_per_display = max(1.0, declared_size_pt * 0.5)
+    content_min_disp = [0] * max_cols
+    for (_r, c), (txt, cs, _rs, _h) in cell_anchors.items():
+        if c >= max_cols:
+            continue
+        cs = max(1, min(cs, max_cols - c))
+        cm = _content_min_width(txt)
+        if cm <= 0:
+            continue
+        share = max(1, cm // cs)
+        for cc in range(c, min(max_cols, c + cs)):
+            content_min_disp[cc] = max(content_min_disp[cc], share)
+    single_col_cap_emu = max(floor_per_col, int(w * 0.5))
+    for c in range(max_cols):
+        if content_min_disp[c] > 0:
+            # +2 display units of padding so the label isn't flush to the border.
+            need_emu = int(round((content_min_disp[c] + 2) * pt_per_display * EMU_PER_PT))
+            min_col_emus[c] = max(min_col_emus[c], min(need_emu, single_col_cap_emu))
+
     total_weight = sum(col_weight) or max_cols
     raw_emus = [
         max(1, int(round(w * cw / total_weight))) for cw in col_weight
@@ -907,25 +1037,33 @@ def render_table(
     cell_size_pt = size_ceiling_pt
     cell_size_px = max(1, int(round(cell_size_pt)))
     meas_font = get_font(cell_size_px)
+    meas_font_bold = get_font(cell_size_px, bold=True) or meas_font
     natural_h_px = (
         (sum(meas_font.getmetrics()) if meas_font else cell_size_px * 1.2)
     )
 
-    def _line_count_in_col(cell: str, col_idx: int, cs: int = 1) -> int:
-        if not cell or meas_font is None:
+    def _line_count_in_col(cell: str, col_idx: int, cs: int = 1,
+                           bold: bool = False) -> int:
+        # Measure with the SAME weight the cell renders at — header / row-0
+        # cells render bold, and bold glyphs are ~12-15% wider, so measuring
+        # non-bold would under-count lines and leave the row too short (clip).
+        font = meas_font_bold if bold else meas_font
+        if not cell or font is None:
             return 1
         cell_w_emu = sum(col_w_emus[col_idx:col_idx + max(1, cs)])
         cell_w_pt = cell_w_emu / EMU_PER_PT
         wrapped = wrap_to_width(
-            cell, meas_font, max(1.0, cell_w_pt * 0.95), cell_size_px,
+            cell, font, max(1.0, cell_w_pt * 0.95), cell_size_px,
         )
         return max(1, len(wrapped))
 
     row_lines_arr = [1] * n_rows
-    for (row_idx, col_idx), (cell_text, cs, _rs, _is_h) in cell_anchors.items():
+    for (row_idx, col_idx), (cell_text, cs, _rs, is_header) in cell_anchors.items():
         row_lines_arr[row_idx] = max(
             row_lines_arr[row_idx],
-            _line_count_in_col(cell_text, col_idx, cs),
+            _line_count_in_col(
+                cell_text, col_idx, cs, bold=bool(is_header or row_idx == 0),
+            ),
         )
 
     bbox_h_pt = h / EMU_PER_PT
@@ -976,15 +1114,34 @@ def render_table(
                     max_size_pt=cell_size_pt,
                 )
                 cell_style = dict(style)
-                cell_style["size"] = (
-                    fitted_cell_pt if cell_text else cell_size_pt
-                )
+                if fitted_cell_lines is None and cell_text:
+                    # Cell text can't fit its column even at the floor size.
+                    # Render the FULL text wrapped at the floor (never an
+                    # ellipsis) — the row already grows to a readable minimum,
+                    # so the extra lines stay visible rather than being lost.
+                    cell_style["size"] = min(cell_size_pt, 6.0)
+                    _f = get_font(
+                        max(1, int(round(6.0))),
+                        bold=bool(is_header or row_idx == 0),
+                    )
+                    if _f is not None:
+                        _wrapped = wrap_to_width(
+                            cell_text, _f, max(1.0, cell_w_pt_for_fit) * 0.93,
+                            int(round(6.0)),
+                        )
+                        rendered_cell_text = "\n".join(_wrapped)
+                    else:
+                        rendered_cell_text = cell_text
+                else:
+                    cell_style["size"] = (
+                        fitted_cell_pt if cell_text else cell_size_pt
+                    )
+                    rendered_cell_text = (
+                        "\n".join(fitted_cell_lines)
+                        if fitted_cell_lines else cell_text
+                    )
                 if is_header or row_idx == 0:
                     cell_style["bold"] = True
-                rendered_cell_text = (
-                    "\n".join(fitted_cell_lines)
-                    if fitted_cell_lines else cell_text
-                )
                 run_xml = build_run_xml(rendered_cell_text, cell_style)
                 # Tables are universally centered in the source docs we see
                 # (engineering reports, risk matrices, parts lists). Center
@@ -1114,11 +1271,19 @@ def render_table(
 
     tbl_xml = f"<w:tbl>{tbl_pr_xml}{grid_xml}{''.join(rows_xml_parts)}</w:tbl>"
     body_xml = tbl_xml + '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>'
-    # noAutofit: don't let the textbox grow past the source bbox. Rows + cell
-    # content are all sized to fit so nothing should overflow.
+    # Normally noAutofit: rows + cell content are sized to fit the source bbox.
+    # But every row is floored at `min_row_pt` (readable minimum) above, so when
+    # the OCR bbox is too short for the row count the floored rows sum past `h`.
+    # With a fixed-height box those extra rows are hard-clipped (the bottom of
+    # the table just disappears). Detect that case and grow the box to the rows'
+    # real total + auto-fit so the whole table stays visible.
+    rows_total_emu = int(round(sum(row_h_pts) * EMU_PER_PT))
+    table_grew_past_bbox = rows_total_emu > h
+    if table_grew_past_bbox:
+        h = rows_total_emu
     ctx.xml_chunks.append(
         build_anchored_textbox_xml(
             x, y, w, h, body_xml, ctx._next_id(),
-            body_auto_fit=False,
+            body_auto_fit=table_grew_past_bbox,
         )
     )

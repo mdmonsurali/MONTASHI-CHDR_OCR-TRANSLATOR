@@ -384,12 +384,42 @@ def fit_multiline(
         else:
             hi = mid - 0.5
 
-    # Fallback path: text expanded completely past layout limits at the readable floor size.
-    # Instead of introducing microscopic font allocations (1pt) or box layout explosions,
-    # cleanly truncate the long string using ellipses to preserve spacing boundaries.
+    # Fallback path: the text can't fit the box even at the readable floor size.
+    # Return `lines=None` to SIGNAL this to the caller instead of silently
+    # truncating to an ellipsis (which loses the content). Callers respond by
+    # growing the box / row so the full text stays visible — see
+    # `text_entry.render_text_entry` (body_auto_fit) and `table.render_table`.
+    # Truncation-to-ellipsis is still available on demand via `fit_or_truncate`.
     if best_lines is None:
-        floor_px = max(1, int(round(min_size_pt * pt_to_px)))
-        best_lines = _truncate_to_fit(text, floor_px, box_w_px, box_h_px, bold=bold)
-        best_size = float(min_size_pt)
+        return float(min_size_pt), None
 
     return max(float(min_size_pt), best_size), best_lines
+
+
+def fit_or_truncate(
+    text: str,
+    box_w_pt: float,
+    box_h_pt: float,
+    max_size_pt: float = 11.0,
+    min_size_pt: float = 6.0,
+    dpi: int = 72,
+    bold: bool = False,
+) -> Tuple[float, List[str]]:
+    """Like `fit_multiline` but ALWAYS returns renderable lines: if the text
+    can't fit even at the floor size, it is truncated with an ellipsis rather
+    than reported as unfittable. Use only where growing the box is not an
+    option and clipping is the lesser evil."""
+    size, lines = fit_multiline(
+        text, box_w_pt, box_h_pt, max_size_pt=max_size_pt,
+        min_size_pt=min_size_pt, dpi=dpi, bold=bold,
+    )
+    if lines is not None:
+        return size, lines
+    if not text.strip() or box_w_pt <= 0 or box_h_pt <= 0 or _FONT_PATH is None:
+        return max_size_pt, [text]
+    pt_to_px = dpi / 72.0
+    floor_px = max(1, int(round(min_size_pt * pt_to_px)))
+    truncated = _truncate_to_fit(
+        text, floor_px, box_w_pt * pt_to_px, box_h_pt * pt_to_px, bold=bold,
+    )
+    return float(min_size_pt), truncated

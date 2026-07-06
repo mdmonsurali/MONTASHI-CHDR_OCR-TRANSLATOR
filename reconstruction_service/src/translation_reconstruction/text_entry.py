@@ -8,9 +8,9 @@ from typing import Dict, Optional
 
 
 def render_text_entry(ctx, entry: Dict) -> None:
-    from .geometry import bbox_px_to_emu
+    from .geometry import bbox_px_to_emu, EMU_PER_PT
     from .ooxml import build_anchored_textbox_xml, build_paragraph_xml, build_run_xml
-    from .text_fit import get_font, measure_width_px, fit_multiline
+    from .text_fit import get_font, has_cjk, wrap_to_width, fit_multiline
 
     text = (entry.get("text") or "").strip()
     if not text:
@@ -45,31 +45,50 @@ def render_text_entry(ctx, entry: Dict) -> None:
     # Use the robust fitting engine to calculate font size and line splits
     # maintaining a strict readable minimum floor (6.0 pt) to avoid unreadable text.
     fit_size_pt, lines = fit_multiline(
-        text, 
-        box_w_pt, 
-        box_h_pt, 
-        max_size_pt=base_size_pt, 
+        text,
+        box_w_pt,
+        box_h_pt,
+        max_size_pt=base_size_pt,
         min_size_pt=6.0,  # Human-readable font floor
         bold=bold_render
     )
-    style["size"] = fit_size_pt
-
-    # Reconstruct text with hard line breaks matching our measurement safely
-    if lines:
-        processed_text = "\n".join(lines)
-    else:
-        processed_text = text
 
     x, y, w, h = bbox_px_to_emu(
         [x1, y1, x2, padded_y2], zoom, ctx.page_w_pt, ctx.page_h_pt,
     )
 
+    # `lines is None` means the text can't fit the OCR bbox even at the 6 pt
+    # floor. Instead of clipping it to an ellipsis (silently losing content —
+    # e.g. long footers/titles the OCR gave a too-short bbox), keep the floor
+    # size, wrap the FULL text, and GROW the box downward (spAutoFit) so every
+    # line is visible. Fixed boundaries are still used for text that fits.
+    body_auto_fit = lines is None
+    if lines is None:
+        floor_pt = 6.0
+        style["size"] = min(base_size_pt, floor_pt)
+        font = get_font(max(1, int(round(floor_pt))), bold=bold_render)
+        if font is not None:
+            wrapped = wrap_to_width(text, font, box_w_pt * 0.93, int(round(floor_pt)))
+            processed_text = "\n".join(wrapped)
+            asc, desc = font.getmetrics()
+            natural_h = asc + desc
+            if has_cjk(text):
+                natural_h = max(natural_h, floor_pt * 1.2)
+            line_h_pt = natural_h * 1.10
+            needed_h_pt = max(box_h_pt, line_h_pt * len(wrapped))
+            h = max(h, int(round(needed_h_pt * EMU_PER_PT)))
+        else:
+            processed_text = text
+    else:
+        style["size"] = fit_size_pt
+        processed_text = "\n".join(lines) if lines else text
+
     runs_xml = build_run_xml(processed_text, style)
     para_xml = build_paragraph_xml(runs_xml, alignment=alignment, line_pt=None)
-    
+
     ctx.xml_chunks.append(
         build_anchored_textbox_xml(
             x, y, w, h, para_xml, ctx._next_id(),
-            body_auto_fit=False,  # Fixed boundaries prevent Word from blowing up layouts blindly
+            body_auto_fit=body_auto_fit,
         )
     )

@@ -8,11 +8,11 @@ from typing import Dict, Optional
 
 
 def render_text_entry(ctx, entry: Dict) -> None:
-    from .geometry import bbox_px_to_emu
+    from .geometry import bbox_px_to_emu, EMU_PER_PT
     from .ooxml import (
         build_anchored_textbox_xml, build_paragraph_xml, build_run_xml,
     )
-    from .text_fit import fit_multiline
+    from .text_fit import fit_multiline, get_font, has_cjk, wrap_to_width
 
     text = (entry.get("text") or "").strip()
     if not text:
@@ -48,15 +48,33 @@ def render_text_entry(ctx, entry: Dict) -> None:
     box_h_pt = max(1.0, (y2 - y1) / ctx.zoom)
     base_size_pt = float(style.get("size") or 11.0)
     fitted, lines = fit_multiline(text, box_w_pt, box_h_pt, max_size_pt=base_size_pt)
-    if fitted < base_size_pt:
-        style["size"] = fitted
 
     line_pt: Optional[float] = None
     render_text = text
-    # `lines is None` means fit_multiline couldn't fit even at min font.
-    # In that case let the textbox grow (spAutoFit) instead of clipping.
+    # `lines is None` means the text can't fit the OCR bbox even at the readable
+    # floor. Rather than clipping it to an ellipsis (which silently drops the
+    # content — e.g. long footers/titles the OCR gave a too-short bbox), keep
+    # the readable floor size, wrap the FULL text, and GROW the box downward to
+    # hold every line (spAutoFit). Readable-and-taller beats a lost line.
     body_auto_fit = lines is None
-    if lines:
+    if lines is None:
+        floor_pt = 6.0
+        style["size"] = min(base_size_pt, floor_pt)
+        font = get_font(max(1, int(round(floor_pt))), bold=bool(style.get("bold")))
+        if font is not None:
+            wrapped = wrap_to_width(text, font, box_w_pt * 0.93, int(round(floor_pt)))
+            render_text = "\n".join(wrapped)
+            asc, desc = font.getmetrics()
+            natural_h = asc + desc
+            if has_cjk(text):
+                natural_h = max(natural_h, floor_pt * 1.2)
+            line_h_pt = natural_h * 1.10
+            needed_h_pt = max(box_h_pt, line_h_pt * len(wrapped))
+            # Grow the emitted box height to hold all lines.
+            h = max(h, int(round(needed_h_pt * EMU_PER_PT)))
+    else:
+        if fitted < base_size_pt:
+            style["size"] = fitted
         render_text = "\n".join(lines)        # freeze the measured wrap
         if len(lines) >= 2:
             used_size = float(style.get("size") or 11.0)
