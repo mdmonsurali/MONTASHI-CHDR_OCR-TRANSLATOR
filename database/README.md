@@ -24,7 +24,7 @@ One row per uploaded document in the `documents` table (see
 | `created_at`   | TIMESTAMPTZ  | When the upload row was inserted                       |
 | `updated_at`   | TIMESTAMPTZ  | Last state change                                      |
 
-Bytes live in MinIO under `dotsocr/documents/{id}/{source,output.md,layout.json,output.docx}`.
+Bytes live in MinIO under `ocr/documents/{id}/{source,output.md,layout.json,output.docx}`.
 The DB only stores keys, not bytes.
 
 ## How it gets applied
@@ -57,7 +57,7 @@ For now `migrations/` is an empty placeholder.
 From the host with compose running:
 
 ```bash
-docker exec -it postgres psql -U dotsocr -d dotsocr
+docker exec -it postgres psql -U ocr -d ocr
 
 # In psql:
 \dt                                              -- list tables
@@ -82,9 +82,9 @@ SELECT id, original_name
 `pg_data` is a named Docker volume. To back it up:
 
 ```bash
-docker exec postgres pg_dump -U dotsocr -d dotsocr -Fc > dotsocr.pgdump
+docker exec postgres pg_dump -U ocr -d ocr -Fc > ocr.pgdump
 # Restore:
-cat dotsocr.pgdump | docker exec -i postgres pg_restore -U dotsocr -d dotsocr --clean
+cat ocr.pgdump | docker exec -i postgres pg_restore -U ocr -d ocr --clean
 ```
 
 MinIO bytes are stored separately in the `minio_data` volume; back them up

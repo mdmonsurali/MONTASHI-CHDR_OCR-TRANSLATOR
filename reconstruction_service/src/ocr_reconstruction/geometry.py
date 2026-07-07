@@ -68,8 +68,6 @@ def add_section_for_page(doc: Document, width_pt: float, height_pt: float,
     section.header_distance = Emu(0)
     section.footer_distance = Emu(0)
     section.gutter = Emu(0)
-    # Each section gets its own header/footer so per-page text routed there
-    # doesn't bleed into other pages.
     section.different_first_page_header_footer = False
     section.header.is_linked_to_previous = False
     section.footer.is_linked_to_previous = False

@@ -17,11 +17,11 @@ import asyncpg
 log = logging.getLogger("auth_service.db")
 
 POSTGRES_DSN = (
-    f"postgres://{os.getenv('POSTGRES_USER', 'dotsocr')}"
+    f"postgres://{os.getenv('POSTGRES_USER', 'ocr')}"
     f":{os.getenv('POSTGRES_PASSWORD', 'changeme')}"
     f"@{os.getenv('POSTGRES_HOST', 'postgres')}"
     f":{os.getenv('POSTGRES_PORT', '5432')}"
-    f"/{os.getenv('POSTGRES_DB', 'dotsocr')}"
+    f"/{os.getenv('POSTGRES_DB', 'ocr')}"
 )
 SCHEMA_FILE = Path(os.getenv("SCHEMA_FILE", "/workspace/database/schema.sql"))
 

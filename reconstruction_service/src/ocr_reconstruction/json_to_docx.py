@@ -185,17 +185,7 @@ def json_to_docx(layout_results, output_path="output.docx"):
 
         entries = page["entries"] or raw_entries
 
-        # Remove duplicate / heavily-overlapping entries produced by the OCR
-        # pipeline (same region detected twice, or VLM hallucinating multiple
-        # interpretations of the same table). Uses IoU >= 0.85 + same category;
-        # keeps whichever duplicate has the richer text content.
-        #entries = deduplicate_entries(entries)
 
-        # Page-header / Page-footer entries are rendered as positioned
-        # floating textboxes inside the body (same path as Text/Title/etc.)
-        # so they land at their original bbox y-position. Routing them into
-        # Word's section header/footer container made them stack from y=0
-        # of the page, which broke multi-line headers like a logo block.
         page_w_pt = float(page["page_width_pt"])
         page_zoom = float(page["zoom"])
 

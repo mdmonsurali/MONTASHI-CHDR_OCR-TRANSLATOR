@@ -37,9 +37,7 @@ _CJK_DEFAULT_FONTS = {
     "ko": os.environ.get("DOCX_FONT_KO", "Batang"),        # Korean
 }
 
-# Common Latin-only families that carry no CJK glyphs. When one of these is the
-# active font AND the text has CJK, we add a CJK eastAsia fallback. Matched
-# case-insensitively; extend via DOCX_LATIN_ONLY_FONTS (comma-separated).
+
 _LATIN_ONLY_FONTS = {
     "calibri", "calibri light", "arial", "arial narrow", "helvetica",
     "times new roman", "times", "cambria", "cambria math", "georgia",

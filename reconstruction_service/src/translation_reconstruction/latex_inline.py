@@ -81,10 +81,7 @@ _UNWRAP = (
     "operatorname", "boldsymbol", "bm", "hbox", "mbox", "rm", "bf", "it",
 )
 
-# Unicode super/subscript glyph maps — used for the common single-token cases
-# (digits, +, -, =, parens, a few letters) so short scripts read inline
-# without needing a separate run. Anything not covered falls back to a real
-# Word vertAlign run, which handles arbitrary content.
+
 _SUP = {
     "0": "\u2070", "1": "\u00b9", "2": "\u00b2", "3": "\u00b3", "4": "\u2074",
     "5": "\u2075", "6": "\u2076", "7": "\u2077", "8": "\u2078", "9": "\u2079",

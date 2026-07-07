@@ -71,26 +71,13 @@ def _estimate_line_count(entry: Dict, zoom: float) -> int:
     if not text:
         return 1
     width_px = max(1.0, bbox[2] - bbox[0])
-    # Estimated rendered text width. The absolute advance is fictional; only
-    # the text-width-to-bbox-width RATIO matters. Advance is per-character and
-    # SCRIPT-AWARE: a Latin glyph advances ~half an em, but a CJK ideograph /
-    # fullwidth form advances a full em (~2x). Using one Latin-calibrated
-    # advance for everything under-measures Chinese text by ~2x, collapses the
-    # wrapped-line count to 1, and then `_heuristic_style` divides the whole
-    # multi-line bbox height by a single line — inflating the font size by the
-    # true line count. Counting wide glyphs at 2x advance fixes that at the
-    # root and stays correct for pure-Latin, pure-CJK, and mixed text.
+
     narrow_advance = 7.0 * max(zoom, 1.0)
     wide_advance = 2.0 * narrow_advance
     estimated_text_width = sum(
         wide_advance if _is_wide_char(ch) else narrow_advance for ch in text
     )
-    # Wrapped-line count is a CEILING, not a round: text that spans 1.38 line
-    # widths wraps to 2 lines, not 1. `round()` under-counted every paragraph
-    # whose overflow fraction was below 0.5 — collapsing it toward a single
-    # line and inflating the derived font size. The 0.25 tolerance absorbs the
-    # measurement slop so a paragraph that just barely exceeds an exact line
-    # count (e.g. 2.05) isn't pushed to the next line.
+
     ratio = estimated_text_width / width_px
     by_width = max(1, math.ceil(ratio - 0.25))
     by_newline = text.count("\n") + 1

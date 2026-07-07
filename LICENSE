@@ -1,0 +1,41 @@
+Proprietary License — All Rights Reserved
+
+Copyright (c) 2026 Md Monsur Ali. All Rights Reserved.
+
+This source code and all associated files (the "Software") are proprietary
+and confidential. No part of the Software, including but not limited to the
+source code, documentation, configuration files, assets, and any derivative
+works, may be used, copied, reproduced, modified, merged, published,
+distributed, sublicensed, sold, or incorporated into any other work, in
+whole or in part, in any form or by any means, without the prior written
+permission of the copyright holder.
+
+Viewing this repository on GitHub does not grant any license to use the
+Software. Forking, cloning, or downloading the repository for any purpose
+other than evaluation likewise does not grant any license to use, modify,
+or distribute the Software.
+
+To request permission for any use, including but not limited to academic,
+personal, internal evaluation, or commercial use, contact:
+
+    Md Monsur Ali
+    Email: monsuralirana@gmail.com
+    GitHub: https://github.com/mdmonsurali
+
+Permissions, if granted, will be issued in writing and may be limited in
+scope, duration, and conditions at the sole discretion of the copyright
+holder.
+
+Third-party components included or referenced by the Software (for example
+`opendataloader-pdf`, `docling`, and other dependencies listed in the
+requirements files) remain governed by their own respective licenses. This
+license applies only to the original code and content authored by the
+copyright holder in this repository.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF,
+OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

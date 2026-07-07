@@ -22,17 +22,17 @@ from minio import Minio
 log = logging.getLogger("orchestrator.storage")
 
 POSTGRES_DSN = (
-    f"postgres://{os.getenv('POSTGRES_USER', 'dotsocr')}"
+    f"postgres://{os.getenv('POSTGRES_USER', 'ocr')}"
     f":{os.getenv('POSTGRES_PASSWORD', 'changeme')}"
     f"@{os.getenv('POSTGRES_HOST', 'postgres')}"
     f":{os.getenv('POSTGRES_PORT', '5432')}"
-    f"/{os.getenv('POSTGRES_DB', 'dotsocr')}"
+    f"/{os.getenv('POSTGRES_DB', 'ocr')}"
 )
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "admin")
 MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "changeme")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "dotsocr")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "ocr")
 MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 
@@ -69,7 +69,7 @@ def init_minio() -> None:
     log.info("minio ready: bucket=%s endpoint=%s", MINIO_BUCKET, MINIO_ENDPOINT)
 
 
-# ── Reads ─────────────────────────────────────────────────────────────────
+# ── Reads ────────
 
 async def translations_by_source(owner_id: _uuid.UUID,
                                   document_ids: list[_uuid.UUID]) -> dict:
@@ -96,8 +96,7 @@ async def translations_by_source(owner_id: _uuid.UUID,
             """,
             owner_id, document_ids,
         )
-    # If a source has multiple translations (re-runs), the first row (newest)
-    # wins — that's what the user expects to download.
+
     out: dict[str, dict] = {}
     for r in rows:
         sid = str(r["source_document_id"])

@@ -85,7 +85,7 @@ Default ports (overridable via `.env`):
 | MinIO console | `${MINIO_CONSOLE_PORT:-9001}` |
 
 `ocr_service`, `orchestrator_service`, and `translator_service` are reached
-through the internal `dotsocr-network` Docker network rather than exposed
+through the internal unlimited OCR Docker network (`ocr-network`) rather than exposed
 directly; `ui_service` is the public entry point.
 
 ## Key routes
@@ -96,6 +96,68 @@ see [`ocr_service/src/main.py`](ocr_service/src/main.py),
 [`translator_service/src/main.py`](translator_service/src/main.py),
 [`ui_service/src/main.py`](ui_service/src/main.py), and
 [`auth_service/src/main.py`](auth_service/src/main.py) for the current list.
+
+---
+
+## Demo
+
+### Administration (master account)
+
+The **master** account is the un-deletable super-admin seeded from `MASTER_USERNAME` / `MASTER_PASSWORD` on first boot. From the Administration page it can create users and admins, rename / change role / reset password / disable / delete any account (except itself), and the Profile dropdown shows the role beside the avatar. Regular admins see only `user` rows in the same table; the master and other admins are hidden from them.
+
+![Master account Administration page with Profile dropdown open](demo-ui/Demo-ui-(Master-Account-Administration).png)
+
+### Single mode
+
+Upload one file and see Markdown, DOCX preview, and JSON side-by-side.
+
+![Single mode](demo-ui/Demo-ui-(Single).png)
+
+### Batch mode
+
+Drop multiple files; each row streams its own status and exposes download buttons as soon as it finishes.
+
+![Batch mode](demo-ui/Demo-ui-(Batch).png)
+
+### DOCX preview
+
+Reconstructed Word document rendered inline (DOCX → PDF via LibreOffice).
+
+![DOCX preview](demo-ui/Demo-ui-(Docx%20Preview%20ui).png)
+
+### MinIO object store
+
+All source uploads and generated artifacts (MD / JSON / DOCX) are persisted in MinIO under `documents/{uuid}/`. Translations land under `translations/{uuid}/` and are linked back to their source document via `translations.source_document_id` in Postgres.
+
+![MinIO console](demo-ui/Demo-ui-(Minio%20S3%20ui).png)
+
+### Translate mode
+
+Upload one or more files and pick a target language from the dropdown
+(English, German, Bangla, Hindi, French, Spanish, Polish, Japanese, Italian,
+Korean, Chinese, Brazilian Portuguese). The orchestrator phases through
+OCR → swap GPU → translate → swap back, streaming a live timeline. Picture
+placement, table layout, multi-page table chaining, formula positions, and
+page geometry from the original DOCX are all preserved in the translated
+DOCX.
+
+![Translate mode — English to German](demo-ui/Translation%20english%20to%20german.png)
+
+The translated DOCX can be previewed inline (rendered to PDF by LibreOffice
+in `ocr_service`). The modal header carries the target language so you can
+tell multiple translations of the same document apart at a glance.
+
+![Translated DOCX preview](demo-ui/translation%20preview.png)
+
+### Task history
+
+Every OCR'd document is listed under `/history`, scoped to the logged-in
+user. Each row exposes inline downloads for both the original OCR artifacts
+(MD, DOCX, JSON, source) and any translation that has been produced for it
+(translated DOCX, translated JSON, inline preview).
+
+![Task History page](demo-ui/Task%20History.png)
+
 
 ## Notes
 

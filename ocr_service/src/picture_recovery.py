@@ -28,13 +28,9 @@ from PIL import Image
 log = logging.getLogger("ocr_service")
 
 
-# Minimum on-page raster dimensions (in PDF points) below which we ignore the
-# extracted image. PDFs often carry tiny inline glyphs / decorative ornaments
-# that are not real "pictures" the user cares about.
 MIN_PICTURE_SIDE_PT = 12.0
 
-# Two existing-Picture bboxes that overlap by more than this fraction are
-# treated as the same picture (so we don't duplicate one the VLM did detect).
+
 DEDUP_IOU_THRESHOLD = 0.4
 
 
@@ -188,9 +184,6 @@ def recover_missing_pictures(pages: List[Dict]) -> List[Dict]:
             if e.get("category") == "Table" and e.get("bbox")
         ]
         if not table_bboxes_px:
-            # We only recover pictures the VLM missed inside a Table; any
-            # other missing picture is a different problem (free-floating
-            # diagrams normally come back from the VLM correctly).
             continue
 
         raster_rects_pt = _extract_pdf_raster_bboxes(pdf_source, page_index)

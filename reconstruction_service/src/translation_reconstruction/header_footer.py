@@ -39,11 +39,7 @@ def apply_text_to_header_footer(
             f'<w:pPr><w:spacing w:before="0" w:after="0"/>'
             f'<w:jc w:val="{alignment}"/></w:pPr>'
         )
-        # Cap the OCR ink-height heuristic size by re-fitting inside the
-        # entry's bbox. The heuristic divides ink-height by line-count badly
-        # (e.g. 3 stacked words in a 61pt bbox → 42.7pt declared), which then
-        # renders the header far larger than the source. Same fit treatment
-        # body text already gets in text_entry.
+
         style = dict(entry.get("style") or {})
         bbox = entry.get("bbox")
         if bbox and len(bbox) == 4:

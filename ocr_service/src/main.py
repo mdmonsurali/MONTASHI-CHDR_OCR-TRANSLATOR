@@ -63,9 +63,6 @@ BATCH_SIZE_SCANNED = int(os.getenv("OCR_BATCH_SIZE_SCANNED", "4"))
 BATCH_SIZE_DEFAULT = int(os.getenv("OCR_BATCH_SIZE", "2"))
 
 # Unlimited-OCR emits bboxes in its model canvas (~1024px), not original
-# image pixels. The picture recovery / cropping pass + the font/style
-# attribution pass both need pixel-accurate bboxes. Default both OFF; the
-# operator can re-enable per-feature via env if a future rescaler lands.
 INCLUDE_PICTURES = os.getenv("INCLUDE_PICTURES", "false").strip().lower() in {
     "1", "true", "yes", "on",
 }
@@ -76,10 +73,8 @@ ATTRIBUTE_STYLES = os.getenv("ATTRIBUTE_STYLES", "false").strip().lower() in {
 ARTIFACT_KINDS = {"source", "md", "json", "docx"}
 
 
-# ───────────────────────────────────────────────────────────────────────────
 # Identity — trusted from ui_service over the docker network. Drop the
 # host port mapping for 8001 in production so this header can't be forged.
-# ───────────────────────────────────────────────────────────────────────────
 
 class Identity:
     __slots__ = ("id", "role")
@@ -110,9 +105,7 @@ def _assert_owner_or_404(doc: dict, user_id: _uuid.UUID) -> None:
         raise HTTPException(404, "Document not found")
 
 
-# ───────────────────────────────────────────────────────────────────────────
 # Lifespan: Postgres pool + MinIO client + schema
-# ───────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -143,9 +136,7 @@ logging.getLogger("uvicorn.access").addFilter(
 )
 
 
-# ───────────────────────────────────────────────────────────────────────────
 # Pipeline helpers (image extraction + async vLLM fan-out)
-# ───────────────────────────────────────────────────────────────────────────
 
 def _pages_from_path(in_path: Path) -> List[dict]:
     """One geometry-aware page dict per page for any supported input type.
@@ -214,10 +205,7 @@ async def _ocr_one_page_async(page_meta: dict, sem: asyncio.Semaphore) -> dict:
         "layout_result": layout,
         "markdown_content": "",
     }
-    # Second pass: re-OCR each detected table from its high-res crop and swap in
-    # the result when it is structurally richer (recovers merged labels / dropped
-    # rows the downscaled full-page pass lost). Guarded + best-effort, so it can
-    # never make a table worse or fail the page. No-op when OCR_TABLE_REFINE=0.
+
     try:
         await refine_tables_on_page(page)
     except Exception as exc:
@@ -290,9 +278,7 @@ async def _upload_picture_assets(doc_id: _uuid.UUID, pages: List[dict]) -> List[
     return pages
 
 
-# ───────────────────────────────────────────────────────────────────────────
 # Core pipeline — runs against an on-disk temp file, persists to MinIO + DB
-# ───────────────────────────────────────────────────────────────────────────
 
 async def _run_pipeline(in_path: Path, source_bytes: bytes, original_name: str,
                          owner_id: _uuid.UUID) -> dict:
@@ -334,9 +320,6 @@ async def _run_pipeline(in_path: Path, source_bytes: bytes, original_name: str,
                     if e.get("category") != "Picture"
                 ]
 
-        # Attach per-entry style (font/size/bold/italic/color) before picture
-        # processing so the JSON we persist has both bbox geometry and style.
-        # Skipped when bboxes aren't pixel-accurate (Unlimited-OCR canvas coords).
         if ATTRIBUTE_STYLES:
             _attribute_styles(pages)
 
@@ -388,9 +371,7 @@ async def _run_pipeline(in_path: Path, source_bytes: bytes, original_name: str,
         raise
 
 
-# ───────────────────────────────────────────────────────────────────────────
 # DOCX → PDF preview helper (LibreOffice)
-# ───────────────────────────────────────────────────────────────────────────
 
 def _convert_to_pdf(src: Path, outdir: Path, timeout: int) -> Path:
     subprocess.run(["pkill", "-9", "-f", "soffice"], check=False, capture_output=True)
@@ -413,9 +394,7 @@ def _convert_to_pdf(src: Path, outdir: Path, timeout: int) -> Path:
     return pdf_path
 
 
-# ───────────────────────────────────────────────────────────────────────────
 # Routes
-# ───────────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -466,7 +445,7 @@ async def ocr(file: UploadFile = File(...), identity: Identity = Depends(require
         shutil.rmtree(work, ignore_errors=True)
 
 
-# ── SSE batch ─────────────────────────────────────────────────────────────
+# ── SSE batch ──────
 
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {_json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
@@ -568,7 +547,7 @@ async def ocr_batch(files: List[UploadFile] = File(...),
     )
 
 
-# ── Bulk download ─────────────────────────────────────────────────────────
+# ── Bulk download ──────
 
 @app.post("/ocr/batch-zip")
 async def ocr_batch_zip(payload: dict = Body(...),
@@ -604,11 +583,11 @@ async def ocr_batch_zip(payload: dict = Body(...),
     return StreamingResponse(
         iter([data]),
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="DotsOCR_results.zip"'},
+        headers={"Content-Disposition": 'attachment; filename="OCR_results.zip"'},
     )
 
 
-# ── Document API ──────────────────────────────────────────────────────────
+# ── Document API ──────
 
 @app.get("/documents")
 async def list_documents(limit: int = 50, offset: int = 0, status: str | None = None,
@@ -715,7 +694,7 @@ async def get_document_artifact(doc_id: str, kind: str,
     )
 
 
-# ── DOCX → PDF preview ────────────────────────────────────────────────────
+# ── DOCX → PDF preview ──────
 
 @app.get("/preview/{doc_id}")
 async def preview_docx(doc_id: str, identity: Identity = Depends(require_user)):

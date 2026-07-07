@@ -45,7 +45,7 @@ def _get_client() -> docker.DockerClient:
 EmitStatus = Callable[[str, dict], Awaitable[None]]
 
 
-# ── Low-level state probes ────────────────────────────────────────────────
+# ── Low-level state probes ────
 
 def _container_state(name: str) -> dict:
     """Return {"running": bool, "health": str|None} or {"exists": False}."""
@@ -73,7 +73,7 @@ async def is_healthy(name: str) -> bool:
     return s.get("running", False) and s.get("health") == "healthy"
 
 
-# ── Lifecycle operations ──────────────────────────────────────────────────
+# ── Lifecycle operations ────
 
 def _stop_sync(name: str, timeout: int) -> None:
     c = _get_client().containers.get(name)
@@ -153,7 +153,7 @@ async def wait_healthy(name: str, timeout_s: int = HEALTH_TIMEOUT_SEC,
         await asyncio.sleep(2)
 
 
-# ── High-level swaps used by the pipeline ─────────────────────────────────
+# ── High-level swaps used by the pipeline ──────
 
 async def _emit(emit: Optional[EmitStatus], event: str, payload: dict) -> None:
     if emit is not None:
@@ -257,7 +257,7 @@ async def swap_to_translator(emit: Optional[EmitStatus] = None) -> None:
     })
 
 
-# ── Read-only snapshot for /status endpoint ───────────────────────────────
+# ── Read-only snapshot for /status endpoint ──────
 
 async def snapshot() -> dict:
     ocr = await state(OCR_CONTAINER_NAME)

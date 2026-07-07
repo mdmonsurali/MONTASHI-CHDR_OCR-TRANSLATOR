@@ -101,7 +101,7 @@ def load_images_from_docx(docx_path: str) -> List[Image.Image]:
     return [p["image"] for p in load_pages_from_docx(docx_path)]
 
 
-# ── Font / style extraction (PyMuPDF) ───────────────────────────────────────
+# ── Font / style extraction (PyMuPDF) ───────
 
 def _flag_bold(flags: int, font_name: str) -> bool:
     if flags & (1 << 4):

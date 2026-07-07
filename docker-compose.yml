@@ -28,14 +28,14 @@ services:
       # Postgres
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=${POSTGRES_DB:-dotsocr}
-      - POSTGRES_USER=${POSTGRES_USER:-dotsocr}
+      - POSTGRES_DB=${POSTGRES_DB:-ocr}
+      - POSTGRES_USER=${POSTGRES_USER:-ocr}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
       # MinIO
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-changeme}
-      - MINIO_BUCKET=${MINIO_BUCKET:-dotsocr}
+      - MINIO_BUCKET=${MINIO_BUCKET:-ocr}
       - MINIO_REGION=${MINIO_REGION:-us-east-1}
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - MINIO_UPLOAD_CONCURRENCY=${MINIO_UPLOAD_CONCURRENCY:-8}
@@ -64,13 +64,13 @@ services:
       minio:
         condition: service_healthy
     networks:
-      - dotsocr-network
+      - ocr-network
 
   ui_service:
     build:
       context: ./ui_service
       dockerfile: Dockerfile
-    image: dotsocr_ui:latest
+    image: ocr_ui:latest
     container_name: ui_service
     ports:
       - "${UI_SERVICE_PORT:-8000}:8000"
@@ -88,7 +88,7 @@ services:
         condition: service_started
     restart: unless-stopped
     networks:
-      - dotsocr-network
+      - ocr-network
 
   orchestrator_service:
     build:
@@ -118,7 +118,7 @@ services:
       start_period: 20s
     restart: unless-stopped
     networks:
-      - dotsocr-network
+      - ocr-network
 
   translator_service:
     build:
@@ -148,14 +148,14 @@ services:
       # Postgres
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=${POSTGRES_DB:-dotsocr}
-      - POSTGRES_USER=${POSTGRES_USER:-dotsocr}
+      - POSTGRES_DB=${POSTGRES_DB:-ocr}
+      - POSTGRES_USER=${POSTGRES_USER:-ocr}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
       # MinIO
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-changeme}
-      - MINIO_BUCKET=${MINIO_BUCKET:-dotsocr}
+      - MINIO_BUCKET=${MINIO_BUCKET:-ocr}
       - MINIO_REGION=${MINIO_REGION:-us-east-1}
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - MINIO_UPLOAD_CONCURRENCY=${MINIO_UPLOAD_CONCURRENCY:-8}
@@ -186,7 +186,7 @@ services:
       minio:
         condition: service_healthy
     networks:
-      - dotsocr-network
+      - ocr-network
 
   auth_service:
     build:
@@ -199,8 +199,8 @@ services:
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=${POSTGRES_DB:-dotsocr}
-      - POSTGRES_USER=${POSTGRES_USER:-dotsocr}
+      - POSTGRES_DB=${POSTGRES_DB:-ocr}
+      - POSTGRES_USER=${POSTGRES_USER:-ocr}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
       - MASTER_USERNAME=${MASTER_USERNAME:-${ADMIN_USERNAME:-master}}
       - MASTER_PASSWORD=${MASTER_PASSWORD:-${ADMIN_PASSWORD:?MASTER_PASSWORD or ADMIN_PASSWORD must be set}}
@@ -218,25 +218,25 @@ services:
       start_period: 20s
     restart: unless-stopped
     networks:
-      - dotsocr-network
+      - ocr-network
 
   postgres:
     image: postgres:16-alpine
     container_name: postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-dotsocr}
-      POSTGRES_USER: ${POSTGRES_USER:-dotsocr}
+      POSTGRES_DB: ${POSTGRES_DB:-ocr}
+      POSTGRES_USER: ${POSTGRES_USER:-ocr}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-dotsocr} -d $${POSTGRES_DB:-dotsocr}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ocr} -d $${POSTGRES_DB:-ocr}"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
     networks:
-      - dotsocr-network
+      - ocr-network
 
   minio:
     image: minio/minio:latest
@@ -256,7 +256,7 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - dotsocr-network
+      - ocr-network
 
   minio-init:
     image: minio/mc:latest
@@ -267,7 +267,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-changeme}
-      MINIO_BUCKET: ${MINIO_BUCKET:-dotsocr}
+      MINIO_BUCKET: ${MINIO_BUCKET:-ocr}
     entrypoint: >
       sh -c "
         mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" &&
@@ -276,12 +276,12 @@ services:
       "
     restart: "no"
     networks:
-      - dotsocr-network
+      - ocr-network
 
 volumes:
   pg_data:
   minio_data:
 
 networks:
-  dotsocr-network:
+  ocr-network:
     driver: bridge

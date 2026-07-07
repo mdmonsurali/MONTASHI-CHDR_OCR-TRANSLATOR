@@ -479,7 +479,7 @@ def _assign_pictures_to_cells(
     real PDFs:
       1. One column has very long text and steals geometric width from a
          neighbouring image column (`备注` cell expands past the picture).
-      2. The dotsocr layout returns pictures in cells the OCR labelled
+      2. The ocr layout returns pictures in cells the OCR labelled
          empty (the cell text is `""`), so emptiness is a strong signal
          that's lost if we only look at x-positions.
 
@@ -648,6 +648,123 @@ def compute_col_weights(
     # Lift each column to its longest-unbreakable-token floor so narrow-but-
     # text-bearing columns (e.g. an 'N/ACC' column) stay readable.
     return [max(w, m) for w, m in zip(col_weight, col_min)]
+
+
+def _balance_col_widths(
+    col_w_emus: List[int],
+    min_col_emus: List[int],
+    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
+    max_cols: int,
+    w: int,
+    meas_font,
+    meas_font_bold,
+    cell_size_px: int,
+) -> List[int]:
+    """Redistribute width between columns to un-crush the worst column.
+
+    The proportional allocation is feed-forward: widths are frozen before we
+    know how many lines each cell wraps to. So a column can end up so narrow its
+    text wraps into a tall 1-glyph-per-line strip (which then clips) while a
+    sibling column is over-wide. This pass fixes that WITHOUT growing the table:
+    it moves EMU from low line-pressure (over-wide) columns to the highest
+    line-pressure (crushed) column, holding ``sum(col_w_emus) == w`` and never
+    dropping a column below its floor ``min_col_emus[c]``.
+
+    Objective: minimise the MAXIMUM column line-pressure (the crushed column is
+    exactly the max). Strict-improvement only — a move is kept solely when it
+    lowers the worst column's line count without pushing another column's line
+    count above the old maximum. Converges to a no-op on already-balanced tables
+    (so tables that render fine today are untouched).
+    """
+    if max_cols < 2 or meas_font is None:
+        return col_w_emus
+
+    # Cells grouped by their anchor column, with the weight (bold?) they render
+    # at, so line-count measurement matches the row-height / emission code.
+    col_cells: Dict[int, List[Tuple[str, int, bool]]] = {c: [] for c in range(max_cols)}
+    for (r, c), (txt, cs, _rs, is_header) in cell_anchors.items():
+        if c >= max_cols or not (txt or "").strip():
+            continue
+        col_cells[c].append((txt, max(1, cs), bool(is_header or r == 0)))
+
+    def _col_pressure(widths: List[int], c: int) -> int:
+        """Max wrapped-line count over column c's cells at the given widths.
+        Only counts cells the column ANCHORS (colspan cells contribute to their
+        anchor column so a wide merged header doesn't inflate a data column)."""
+        best = 1
+        for (txt, cs, bold) in col_cells.get(c, []):
+            cell_w_emu = sum(widths[c:c + cs])
+            cell_w_pt = cell_w_emu / EMU_PER_PT
+            font = meas_font_bold if bold else meas_font
+            n = len(wrap_to_width(
+                txt, font, max(1.0, cell_w_pt * 0.95), cell_size_px,
+            ))
+            if n > best:
+                best = n
+        return best
+
+    def _pressures(widths: List[int]) -> List[int]:
+        return [_col_pressure(widths, c) for c in range(max_cols)]
+
+    widths = list(col_w_emus)
+    pressures = _pressures(widths)
+    min_step = max(1, int(round(w * 0.005)))   # 0.5% of table width, granularity
+
+    for _ in range(64):
+        cur_max = max(pressures)
+        if cur_max <= 1:
+            break  # nothing is wrapping badly
+        # Receiver: the most-crushed column (highest line pressure).
+        receiver = max(range(max_cols), key=lambda c: (pressures[c], -c))
+        # Donors: columns with slack above their floor AND lower pressure than
+        # the receiver (over-wide relative to their content). Pick most slack.
+        donors = [
+            c for c in range(max_cols)
+            if c != receiver
+            and widths[c] - min_col_emus[c] >= min_step
+            and pressures[c] < cur_max
+        ]
+        if not donors:
+            break
+        donor = max(donors, key=lambda c: widths[c] - min_col_emus[c])
+        donor_slack = widths[donor] - min_col_emus[donor]
+
+        # Find the SMALLEST transfer that reduces the receiver's line count
+        # (crossing a wrap boundary), bounded by the donor's slack. Widening in
+        # tiny fixed steps stalls because one step rarely crosses a boundary;
+        # instead grow the trial transfer geometrically until the receiver's
+        # pressure drops or the donor runs out / would itself become the worst.
+        best_trial = None
+        move = min_step
+        while move <= donor_slack:
+            trial = list(widths)
+            trial[donor] -= move
+            trial[receiver] += move
+            trial_p = _pressures(trial)
+            # Reject if the donor became as crushed as the receiver was — that
+            # just relocates the problem.
+            if trial_p[donor] >= cur_max:
+                break
+            improved = (
+                max(trial_p) < cur_max
+                or (max(trial_p) == cur_max
+                    and trial_p.count(cur_max) < pressures.count(cur_max))
+            )
+            if improved:
+                best_trial = (trial, trial_p)
+                break
+            move *= 2
+        if best_trial is None:
+            break
+        widths, pressures = best_trial
+
+    # Preserve exact-sum invariant (rounding-safe): any residual goes to the
+    # widest column, mirroring the caller's drift fixup.
+    drift = sum(widths) - w
+    if drift != 0:
+        widest = max(range(max_cols), key=lambda i: widths[i])
+        widths[widest] = max(1, widths[widest] - drift)
+    return widths
 
 
 def render_table(
@@ -844,6 +961,23 @@ def render_table(
         # Adjust the widest column to absorb the rounding drift.
         widest = max(range(max_cols), key=lambda i: col_w_emus[i])
         col_w_emus[widest] = max(1, col_w_emus[widest] - drift)
+
+    # WIDTH-FIRST rebalancing: the proportional split above is feed-forward, so
+    # a column can be left crushed (its text wraps to a 1-glyph-per-line strip)
+    # while a sibling is over-wide. Move width from low-line-pressure columns to
+    # the most-crushed one — within the SAME total `w`, respecting floors — so
+    # text stays visible before we ever grow rows or shrink fonts. A no-op when
+    # widths are already balanced. Measured at a font derived from the current
+    # narrowest column (relative line counts are what the balancer compares).
+    _bal_narrow_pt = min(col_w_emus) / EMU_PER_PT
+    _bal_size_pt = min(declared_size_pt, max(7.0, _bal_narrow_pt / 5.0), 12.0)
+    _bal_size_px = max(1, int(round(_bal_size_pt)))
+    _bal_font = get_font(_bal_size_px)
+    _bal_font_bold = get_font(_bal_size_px, bold=True) or _bal_font
+    col_w_emus = _balance_col_widths(
+        col_w_emus, min_col_emus, cell_anchors, max_cols, w,
+        _bal_font, _bal_font_bold, _bal_size_px,
+    )
 
     grid_xml = "<w:tblGrid>" + ("".join(
         f'<w:gridCol w:w="{cw}"/>' for cw in col_w_emus

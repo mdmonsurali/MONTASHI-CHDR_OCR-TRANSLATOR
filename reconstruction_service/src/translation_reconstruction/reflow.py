@@ -32,13 +32,7 @@ _CASCADE_CATEGORIES = {
 # Pinned entries: never expand, never pushed, never scaled.
 _FIXED_CATEGORIES = {"Page-header", "Page-footer"}
 
-# Entries excluded from cascade PUSH. Empty by default: every non-fixed entry
-# (Pictures included) moves uniformly with the cascade so text can never grow
-# onto a picture below it. Containment and in-table cell assignment are
-# computed against PRE-REFLOW snapshots (see json_to_docx / table.py), so they
-# stay correct regardless of how far an entry is pushed or scaled — there is no
-# frame to keep frozen. To restore the old "frozen pictures" behaviour, add
-# "Picture" here.
+
 _PUSH_EXCLUDED: set = set()
 
 # Safety gap (in points, scaled by zoom at use site) kept between a widened
@@ -49,10 +43,7 @@ _GAP_PT = 6.0
 # last glyph isn't flush against the box edge.
 _PAD_PT = 4.0
 
-# Must match text_fit._wrapped_lines_if_fit's width_safety: the fitter only
-# uses this fraction of the box width before wrapping, so when we hug a box to
-# its text we divide the measured ink width back out by it — otherwise the
-# re-fit would wrap the longest line and add a line.
+
 _WIDTH_SAFETY = 0.93
 
 
@@ -322,13 +313,6 @@ def reflow_page_entries(
                         jx1, jy1, jx2, jy2 = [float(v) for v in cascade_entries[j]["bbox"]]
                         cascade_entries[j]["bbox"] = [jx1, jy1 + delta, jx2, jy2 + delta]
 
-        # ALWAYS hug the width to the rendered text + one letter. This trims
-        # the empty right margin of any box wider than its (possibly short)
-        # translation, including boxes that never overflowed. Clamped to the
-        # current width so it can only NARROW — narrowing preserves the line
-        # count, so height is unchanged and no overlap is introduced. The left
-        # edge is fixed, which (with left alignment at render time) keeps the
-        # text reading from the original left margin.
         x2_now = float(entry["bbox"][2])
         hug_x2 = _hugged_x2(entry, zoom, x1, x2_now)
         if hug_x2 is not None:

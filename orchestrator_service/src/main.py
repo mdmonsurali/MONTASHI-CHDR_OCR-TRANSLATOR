@@ -134,10 +134,6 @@ async def run_batch(files: List[UploadFile] = File(...),
         raise HTTPException(400, "No valid files")
 
     async def event_stream():
-        # Queue between the worker task and the streaming generator. We use
-        # asyncio.Queue so the SSE emitter and the pipeline can interleave
-        # cleanly — the pipeline can block on swap_to_translator without
-        # holding up emitted events.
         out_q: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
 
@@ -187,7 +183,7 @@ async def run_batch(files: List[UploadFile] = File(...),
     )
 
 
-# ── Artifact serving ─────────────────────────────────────────────────────
+# ── Artifact serving ───
 # Lets users download translated DOCX / JSON / preview while
 # translator_service is stopped between batches.
 

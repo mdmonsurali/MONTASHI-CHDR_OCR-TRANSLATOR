@@ -14,22 +14,7 @@ from typing import Dict, List, Optional
 
 from docx import Document
 
-# ---------------------------------------------------------------------------
-# East-Asian font handling.
-#
-# Word applies the `w:eastAsia` face to CJK codepoints and `w:ascii`/`w:hAnsi`
-# to Latin ones within the same run. We NEVER override a font the upstream
-# style/size detector supplied — a detected font is used for BOTH slots, so
-# glyph widths (and therefore layout fit) are exactly what the detector sized
-# for. A CJK default is substituted into the eastAsia slot ONLY when:
-#   (a) the run actually contains CJK codepoints, AND
-#   (b) the chosen font is a known Latin-only family that cannot render them
-#       (this is the scanned-input / heuristic-fallback case where no real
-#       font was detected and "Calibri" was filled in as a placeholder).
-# In every other case the detected font is respected verbatim. Choosing the
-# CJK default is language-aware (Chinese / Japanese / Korean) rather than
-# assuming Chinese, so Han glyphs render with the right regional shapes.
-#
+
 # Per-script defaults are env-overridable per deployment.
 _CJK_DEFAULT_FONTS = {
     "zh": os.environ.get("DOCX_FONT_ZH", "SimSun"),        # Chinese

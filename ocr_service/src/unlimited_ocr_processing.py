@@ -9,7 +9,7 @@ OpenAI-compatible API. Unlimited-OCR emits a custom format:
 (empirically: max coords ≤ 1000 regardless of input image size). We rescale
 to original-image pixels here so downstream font_attribution,
 picture_recovery, layoutjson2md, and json_to_docx (which expect pixel
-bboxes, like DotsOCR produced) keep working.
+bboxes, like the OCR model produced) keep working.
 """
 
 import asyncio

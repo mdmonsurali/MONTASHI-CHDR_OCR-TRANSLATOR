@@ -18,21 +18,7 @@ plt.rcParams["text.usetex"] = False
 plt.rcParams["mathtext.fontset"] = "cm"
 plt.rcParams["font.size"] = 18
 
-# Make regular text content (i.e. anything outside `$...$` math segments) fall
-# back to a multi-script font when the default serif font has no glyph for a
-# codepoint. matplotlib walks this list per-glyph and picks the first font
-# that contains the requested character. Pure math segments (rendered via
-# matplotlib's mathtext at `mathtext.fontset = "cm"`) keep their Computer
-# Modern glyphs for letters, digits, operators, sub/superscripts.
-#
-# Important: matplotlib only registers the FIRST face inside a TTC (TrueType
-# Collection) file. Noto Sans/Serif CJK ships as a single TTC whose first
-# face is `JP`, so the registered names are `Noto Sans CJK JP` and
-# `Noto Serif CJK JP` even though the file covers SC / TC / JP / KR / Han
-# ideographs. Listing `Noto Sans CJK SC` here does nothing.
-#
-# Order: CJK first (covers Han ideographs used in Chinese, Japanese, Korean
-# OCR output), then DejaVu Serif for Latin / Greek / common symbols.
+
 plt.rcParams["font.family"] = "serif"
 plt.rcParams["font.serif"] = [
     "Noto Serif CJK JP",   # covers Han / Hiragana / Katakana / Hangul
@@ -41,9 +27,7 @@ plt.rcParams["font.serif"] = [
 ]
 plt.rcParams["axes.unicode_minus"] = False
 
-# Best-effort: rebuild matplotlib's font manager if it hasn't picked up the
-# newly-installed Noto CJK TTC yet. Safe no-op when the cache is already
-# fresh; only runs at module import time so the cost is one-shot.
+
 try:
     from matplotlib import font_manager as _font_manager
     if not any("CJK" in (f.name or "") for f in _font_manager.fontManager.ttflist):
@@ -100,31 +84,14 @@ def create_formula_image(
     if not clean:
         return None
 
-    # Try pdflatex first when ImageMagick is permitted to read PDFs AND the
-    # input is pure Latin/ASCII math. Some hosts ship `policy.xml` with
-    # `coder PDF rights="none"` (Ubuntu / Debian default), which makes
-    # `convert pdf png` fail. In that case we fall through to matplotlib.
-    #
-    # Skip pdflatex entirely when the input contains any non-ASCII glyph
-    # (CJK, accented Latin, Greek, etc.): the default LaTeX preamble has no
-    # CJK font, so pdflatex silently drops those characters and still emits
-    # a PDF containing only the Latin/math atoms. That produced the "Chinese
-    # text disappeared, only numbers survived" bug. matplotlib's mathtext
-    # path handles mixed scripts via `_build_renderable_string` + per-glyph
-    # font fallback to Noto CJK, so it's the right renderer for those cases.
     has_non_ascii = any(ord(ch) > 127 for ch in clean)
     if not has_non_ascii:
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 tex_file = os.path.join(tmpdir, "formula.tex")
-                # \mathversion{bold} swaps in the bold math font for every
-                # glyph inside the formula — including \frac, \sqrt, etc.,
-                # not just variables. Cleaner than per-token \boldsymbol
-                # since the OCR text isn't always token-clean.
+
                 math_version = "\\mathversion{bold}" if bold else ""
-                # standalone's `varwidth` option respects \fontsize so we
-                # can scale the formula to the caller's requested point
-                # size. Line skip = 1.2 × fontsize is LaTeX's standard.
+
                 font_pt = max(6, int(fontsize))
                 line_pt = int(round(font_pt * 1.2))
                 with open(tex_file, "w") as f:
@@ -143,10 +110,7 @@ def create_formula_image(
                 )
                 pdf_file = os.path.join(tmpdir, "formula.pdf")
                 png_file = os.path.join(tmpdir, "formula.png")
-                # Only accept the PDF when pdflatex reported success. On
-                # failure pdflatex often still emits a partial PDF that
-                # renders with missing/broken glyphs, so trust rc, not the
-                # file's existence.
+
                 if latex_result.returncode == 0 and os.path.exists(pdf_file):
                     result = subprocess.run(
                         ["convert", "-density", "300", "-quality", "100",
@@ -162,30 +126,11 @@ def create_formula_image(
         except Exception:
             pass
 
-    # Matplotlib fallback. We split the LaTeX into math segments and
-    # `\text{...}` text segments, then build a string where math is wrapped
-    # in `$...$` (rendered via matplotlib's mathtext / Computer Modern) and
-    # text is left bare (rendered via the regular text path, which uses
-    # `font.serif` and supports per-glyph font fallback to Noto CJK for any
-    # non-Latin script the OCR emits).
-    #
-    # Wrapping the whole formula in `$...$` like before forces every glyph
-    # — including CJK characters in `\text{...}` — through mathtext's
-    # `rm` font (Computer Modern), which doesn't ship CJK glyphs and renders
-    # tofu boxes. Splitting first preserves math layout AND renders text in
-    # the right script.
     try:
-        # When the caller passed a target width, wrap the renderable string
-        # into multiple lines whose visual width fits inside that width.
-        # Wrapping happens between text/math segments (the boundaries that
-        # `_build_renderable_string` already produces) so we never split a
-        # math atom or an ideograph mid-glyph. If no target width is given,
-        # the whole formula lives on one line — same behaviour as before.
+
         parts = _build_renderable_parts(clean)
         rendered = _wrap_parts(parts, fontsize, target_width_pt)
-        # Sizing the figure width to the target keeps the rendered PNG
-        # aspect ratio close to the destination bbox. Height is generous
-        # so `bbox_inches="tight"` can crop to the ink extent.
+
         if target_width_pt and target_width_pt > 0:
             fig_w = max(2.0, target_width_pt / 72.0)
         else:
@@ -214,8 +159,6 @@ def create_formula_image(
         return None
 
 
-# Match `\text{ ... }` with no nested braces (sufficient for the LaTeX subset
-# the OCR model produces in practice — `\text{...}` is always single-level).
 _TEXT_RE = re.compile(r"\\text\s*\{([^}]*)\}")
 
 
@@ -288,10 +231,6 @@ def _build_renderable_string(latex: str) -> str:
     return "".join(_build_renderable_parts(latex))
 
 
-# Rough width in points of one "average" glyph at fontsize 1pt. Used to
-# estimate line width for the wrap heuristic. CJK ideographs are ~1em wide
-# (matches this constant), Latin letters average ~0.5em; we pick a middle
-# ground so mixed-script lines break at roughly the target bbox width.
 _APPROX_CHAR_WIDTH_PER_PT = 0.55
 
 
@@ -310,11 +249,6 @@ def _wrap_parts(parts: list[str], fontsize: int, target_width_pt: Optional[float
     lines: list[str] = []
     current = ""
     for part in parts:
-        # Rough visible-length estimate: math fragments count as their
-        # atom count (drop the `$` delimiters), text fragments count as
-        # their character length. Ideographs and Latin chars both count
-        # as 1 — the coefficient in `max_line_chars` was calibrated for
-        # this simplification.
         visible = part[1:-1] if part.startswith("$") and part.endswith("$") else part
         if current and len(current) + len(visible) > max_line_chars:
             lines.append(current)
@@ -413,11 +347,7 @@ def render_formula(ctx, entry: Dict) -> None:
     target_pt *= max(0.5, size_multiplier)
     target_pt = max(6.0, min(72.0, target_pt))   # safety clamp
 
-    # Pass the destination bbox width so the matplotlib fallback wraps
-    # mixed-content formulas (CJK prose + inline math) to roughly match the
-    # bbox aspect ratio. Without this, a paragraph-Formula on page 7 of
-    # CH3.5.07 rendered as one 52:1-wide strip that then shrank to ~4pt
-    # when scaled to fit the bbox.
+
     target_width_pt = bbox_w_emu / EMU_PER_PT if bbox_w_emu > 0 else None
     img_buf = create_formula_image(
         text, fontsize=int(round(target_pt)), bold=bold,
@@ -441,9 +371,7 @@ def render_formula(ctx, entry: Dict) -> None:
         )
         return
 
-    # Measure the (trimmed) PNG. After trimming, png height equals the ink
-    # height; converting px → pt at DPI gives the natural rendering size in
-    # points.
+
     from PIL import Image as _PILImage
     img_buf.seek(0)
     png_w_px, png_h_px = _PILImage.open(img_buf).size

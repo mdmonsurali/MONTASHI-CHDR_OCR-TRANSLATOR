@@ -66,10 +66,7 @@ CATEGORY_BASE_SIZE_PT: Dict[str, float] = {
 }
 
 # Categories that should ALWAYS render in bold weight, regardless of what
-# the source style said. Knowing this up-front matters because the text-fit
-# step measures with the bold metric variant — bold glyphs are 12-15% wider
-# than regular, and using the wrong weight produced "fitting" sizes that
-# Word then re-wrapped onto a clipped second line.
+
 ALWAYS_BOLD_CATEGORIES = {
     "Title", "Section-header", "Page-header", "Page-footer", "Caption",
 }
@@ -227,11 +224,6 @@ def json_to_docx(layout_results, output_path="output.docx"):
     """
     doc = Document()
 
-    # Keep a sensible Normal style so any inline run we don't override
-    # still has a reasonable default. Zero the paragraph spacing too:
-    # python-docx's default Normal carries 1.15x line spacing and 10pt
-    # space-after, which would otherwise inflate any paragraph we don't
-    # explicitly override and reintroduce the vertical-clip bug.
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
@@ -243,29 +235,13 @@ def json_to_docx(layout_results, output_path="output.docx"):
 
     shape_counter = 1000  # docPr ids must be unique and >0
 
-    # Normalize every entry's font + base size BEFORE table chaining and
-    # rendering. Downstream text-fit (fit_multiline) will still shrink any
-    # entry whose translated text doesn't fit at the base size — this just
-    # pins a consistent starting point per role.
     _normalize_entry_styles(layout_results)
 
-    # Annotate Table entries that belong to a multi-page chain with a shared
-    # column-weight vector so widths stay consistent across the page break.
+
     _link_table_continuations(layout_results)
 
-    # Reflow every source page in PLACE: one source page -> exactly one
-    # physical page. Boxes grow to the height their translated text needs at
-    # the uniform font and push column-neighbours below them down (pictures
-    # flow too), but nothing moves to another page — the page grows taller to
-    # hold its own content, so the source page count is preserved and every
-    # entry stays on its original page. A page that would exceed Word's height
-    # ceiling is scaled down uniformly (that page only) to avoid clipping.
     physical_pages: List[Dict] = []
-    # Map from entry id → original (pre-reflow) bbox for each Table entry.
-    # Reflow mutates table bboxes in place (y shifts/grows), but table-contained
-    # pictures are excluded from reflow and keep their original coords. We need
-    # the original table bboxes to correctly identify which pictures belong inside
-    # which table after reflow has run.
+
     pre_reflow_table_bboxes: Dict[int, List] = {}
     for raw_page in layout_results:
         page = normalize_page(raw_page)
@@ -282,10 +258,7 @@ def json_to_docx(layout_results, output_path="output.docx"):
         for e in entries:
             if e.get("category") == "Table" and e.get("bbox"):
                 pre_reflow_table_bboxes[id(e)] = list(e["bbox"])
-            # Snapshot each picture's pre-reflow bbox. Pictures are frozen
-            # during cascade push but may still be scaled by layout_page;
-            # the snapshot keeps picture→cell assignment in the original
-            # coordinate frame (see render_table / _assign_pictures_to_cells).
+
             if e.get("category") == "Picture" and e.get("bbox"):
                 e["_orig_bbox"] = list(e["bbox"])
         physical_pages.extend(layout_page(
@@ -307,12 +280,6 @@ def json_to_docx(layout_results, output_path="output.docx"):
             page_h_pt,
             first=(idx == 0),
         )
-
-        # Page-header / Page-footer entries are rendered as positioned
-        # floating textboxes inside the body (same path as Text/Title/etc.)
-        # so they land at their original bbox y-position. Routing them into
-        # Word's section header/footer container made them stack from y=0
-        # of the page, which broke multi-line headers like a logo block.
 
         ctx = ShapeContext(
             doc,

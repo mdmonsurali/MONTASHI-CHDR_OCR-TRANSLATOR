@@ -1,4 +1,4 @@
--- DotsOCR persistence schema.
+-- OCR persistence schema.
 --
 -- Applied at ocr_service startup by storage.init_schema(). Idempotent because
 -- of IF NOT EXISTS. The source of truth in v1 — future schema changes go in

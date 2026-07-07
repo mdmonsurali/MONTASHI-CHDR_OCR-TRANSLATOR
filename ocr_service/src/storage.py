@@ -1,4 +1,4 @@
-"""Storage layer for DotsOCR — Postgres metadata + MinIO bytes.
+"""Storage layer for OCR — Postgres metadata + MinIO bytes.
 
 Owns:
 - One asyncpg connection pool (POSTGRES_*).
@@ -44,31 +44,31 @@ log = logging.getLogger("ocr_service.storage")
 # ── Config from env ───────────────────────────────────────────────────────
 
 POSTGRES_DSN = (
-    f"postgres://{os.getenv('POSTGRES_USER', 'dotsocr')}"
+    f"postgres://{os.getenv('POSTGRES_USER', 'ocr')}"
     f":{os.getenv('POSTGRES_PASSWORD', 'changeme')}"
     f"@{os.getenv('POSTGRES_HOST', 'postgres')}"
     f":{os.getenv('POSTGRES_PORT', '5432')}"
-    f"/{os.getenv('POSTGRES_DB', 'dotsocr')}"
+    f"/{os.getenv('POSTGRES_DB', 'ocr')}"
 )
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "admin")
 MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "changeme")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "dotsocr")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "ocr")
 MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 
 UPLOAD_CONCURRENCY = int(os.getenv("MINIO_UPLOAD_CONCURRENCY", "8"))
 SCHEMA_FILE = Path(os.getenv("SCHEMA_FILE", "/workspace/database/schema.sql"))
 
-# ── Module state ──────────────────────────────────────────────────────────
+# ── Module state ────────
 
 pool: Optional[asyncpg.Pool] = None
 minio: Optional[Minio] = None
 _upload_sem: Optional[asyncio.Semaphore] = None
 
 
-# ── Lifecycle ─────────────────────────────────────────────────────────────
+# ── Lifecycle ────
 
 async def init_pool() -> None:
     global pool
@@ -111,7 +111,7 @@ async def init_schema() -> None:
     log.info("schema applied from %s", SCHEMA_FILE)
 
 
-# ── Health probes ─────────────────────────────────────────────────────────
+# ── Health probes ────
 
 async def health_postgres() -> None:
     if pool is None:
@@ -127,7 +127,7 @@ def health_minio() -> None:
     minio.bucket_exists(MINIO_BUCKET)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+# ── Helpers ───
 
 ARTIFACT_KEY = {
     "md":   "output.md",
@@ -199,7 +199,7 @@ class _BytesReader:
         return chunk
 
 
-# ── CRUD ──────────────────────────────────────────────────────────────────
+# ── CRUD ─────────
 
 async def insert_document(original_name: str, ext: str, source_bytes: bytes,
                           owner_id: _uuid.UUID) -> _uuid.UUID:

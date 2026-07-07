@@ -33,9 +33,7 @@ import re
 from typing import Callable, List, Optional, Tuple
 
 
-# ---------------------------------------------------------------------------
 # Command → Unicode tables. These are standard LaTeX, not document-specific.
-# ---------------------------------------------------------------------------
 _SYMBOLS = {
     r"\pm": "\u00b1", r"\mp": "\u2213", r"\times": "\u00d7", r"\div": "\u00f7",
     r"\cdot": "\u00b7", r"\ast": "*", r"\star": "\u22c6",

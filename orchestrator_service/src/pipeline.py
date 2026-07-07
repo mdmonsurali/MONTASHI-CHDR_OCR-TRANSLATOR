@@ -55,7 +55,7 @@ class PreparedFile:
         self.page_count: Optional[int] = None
 
 
-# ── Phase 1: OCR ──────────────────────────────────────────────────────────
+# ── Phase 1: OCR ───
 
 async def _call_ocr(client: httpx.AsyncClient, p: PreparedFile,
                      identity: Identity) -> dict:
@@ -130,7 +130,7 @@ async def _phase_ocr(prepared: List[PreparedFile], identity: Identity,
     log.info("[orchestrator] OCR PHASE END: %d/%d ok", ok, len(prepared))
 
 
-# ── Phase 3: translate ────────────────────────────────────────────────────
+# ── Phase 3: translate ───────
 
 async def _call_translate(client: httpx.AsyncClient, doc_id: str,
                            identity: Identity, target_lang: str) -> dict:
@@ -253,7 +253,7 @@ async def _phase_translate(prepared: List[PreparedFile], identity: Identity,
              ok, len(targets))
 
 
-# ── Top-level orchestration ────────────────────────────────────────────────
+# ── Top-level orchestration ──────
 
 async def prepare_uploads(files) -> List[PreparedFile]:
     """Drain UploadFile bodies upfront so the SSE generator can keep going
