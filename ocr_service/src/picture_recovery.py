@@ -107,7 +107,7 @@ def _existing_picture_rects_px(
 ) -> List[Tuple[int, int, int, int]]:
     out: List[Tuple[int, int, int, int]] = []
     for e in entries:
-        if e.get("category") != "Picture":
+        if e.get("category") not in ("Image", "Figure"):
             continue
         bb = e.get("bbox")
         if not bb or len(bb) != 4:
@@ -206,7 +206,7 @@ def recover_missing_pictures(pages: List[Dict]) -> List[Dict]:
             crop = original_img.crop((x1, y1, x2, y2))
             new_entry = {
                 "bbox": [x1, y1, x2, y2],
-                "category": "Picture",
+                "category": "Image",
                 "text": "",
                 "image_obj": crop,
                 "source": "recovered",

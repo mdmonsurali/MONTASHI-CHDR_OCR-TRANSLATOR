@@ -194,31 +194,37 @@ def layoutjson2md(image: Image.Image, layout_data, text_key: str = "text") -> st
         for item in sorted_items:
             category = item.get("category", "")
             text = item.get(text_key, "")
-            if category == "Picture":
-                markdown_lines.append("![Image](Image detected)\n")
+            if category in ("Image", "Figure"):
+                # Reference the stored crop when available (set by
+                # _upload_picture_assets), else a descriptive placeholder.
+                url = item.get("image_url") or "Image detected"
+                alt = (text or "Image").strip() or "Image"
+                markdown_lines.append(f"![{alt}]({url})\n")
             elif not text:
                 continue
-            elif category == "Page-header":
+            elif category in ("Page-Header", "Section-Header"):
                 markdown_lines.append(f"## {text}\n")
             elif category == "Title":
                 markdown_lines.append(f"# {text}\n")
-            elif category == "Section-header":
-                markdown_lines.append(f"## {text}\n")
-            elif category == "Text":
+            elif category in ("Text", "Complex-Block", "Bibliography",
+                              "Table-Of-Contents"):
                 markdown_lines.append(f"{text}\n")
-            elif category == "List-item":
-                markdown_lines.append(f"- {text}\n")
+            elif category == "List-Group":
+                markdown_lines.append(f"{text}\n")
             elif category == "Table":
                 markdown_lines.append(
                     text if text.strip().startswith("<") else f"**Table:** {text}\n"
                 )
-            elif category == "Formula":
-                markdown_lines.append(f"{text}\n")
+            elif category in ("Equation-Block", "Formula"):
+                markdown_lines.append(f"$$\n{text}\n$$\n")
+            elif category in ("Code-Block", "Chemical-Block", "Form"):
+                markdown_lines.append(f"```\n{text}\n```\n")
+            elif category == "Diagram":
+                # Chandra emits mermaid for diagrams.
+                markdown_lines.append(f"```mermaid\n{text}\n```\n")
             elif category == "Caption":
                 markdown_lines.append(f"*{text}*\n")
-            elif category == "Page-footer":
-                markdown_lines.append(f"^{text}^\n")
-            elif category == "Footnote":
+            elif category in ("Page-Footer", "Footnote"):
                 markdown_lines.append(f"^{text}^\n")
             else:
                 # Unknown / future category: render as plain text rather than

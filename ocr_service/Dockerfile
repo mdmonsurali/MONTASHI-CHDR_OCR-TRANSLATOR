@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:unlimited-ocr
+FROM vllm/vllm-openai:v0.17.0
 
 WORKDIR /workspace
 
@@ -25,6 +25,18 @@ RUN sed -i 's|<policy domain="coder" rights="none" pattern="PDF"|<policy domain=
 COPY ocr_service/requirements.txt /workspace/ocr_service/
 RUN pip3 install --no-cache-dir -r /workspace/ocr_service/requirements.txt
 
+# Pre-bake the Chandra OCR 2 weights into the image so cold start does not
+# depend on a runtime HuggingFace download. Pass --build-arg HF_TOKEN=... if
+# the repo is gated. Weights land in the standard HF cache so `vllm serve
+# datalab-to/chandra-ocr-2` resolves them offline.
+ARG HF_TOKEN=""
+ARG CHANDRA_MODEL=datalab-to/chandra-ocr-2
+ENV HF_HOME=/opt/hf-cache
+RUN pip3 install --no-cache-dir "huggingface_hub[cli]" && \
+    HF_TOKEN="${HF_TOKEN}" huggingface-cli download "${CHANDRA_MODEL}" \
+        --exclude "*.pth" "original/*" && \
+    echo "chandra weights cached under ${HF_HOME}"
+
 COPY ocr_service/src/ /workspace/ocr_service/src/
 COPY ocr_service/entrypoint.sh /workspace/ocr_service/entrypoint.sh
 RUN chmod +x /workspace/ocr_service/entrypoint.sh
@@ -41,8 +53,9 @@ ENV PYTHONPATH=/workspace:/workspace/ocr_service/src:$PYTHONPATH
 ENV OCR_SERVICE_PORT=8001
 ENV VLLM_PORT=8888
 ENV VLLM_SERVICE_URL=http://localhost:8888
-# Served-model name baked into the vllm/vllm-openai:unlimited-ocr image.
-ENV OCR_MODEL_NAME=Unlimited-OCR
+# Served-model name vLLM advertises; must match OCR_MODEL_NAME the client uses.
+ENV OCR_MODEL_NAME=chandra
+ENV CHANDRA_MODEL=datalab-to/chandra-ocr-2
 
 EXPOSE 8888 8001
 
@@ -57,17 +70,13 @@ WORKDIR /workspace/ocr_service/src
 ENTRYPOINT ["/bin/bash", "-c"]
 CMD ["\
      source /workspace/ocr_service/entrypoint.sh; \
-     vllm serve baidu/Unlimited-OCR \
+     vllm serve $CHANDRA_MODEL \
          --tensor-parallel-size 1 \
          --gpu-memory-utilization $GPU_MEM_UTIL \
          --max-model-len $MAX_MODEL_LEN \
          --max-num-seqs $VLLM_MAX_NUM_SEQS \
-         --logits-processors vllm.model_executor.models.unlimited_ocr:NGramPerReqLogitsProcessor \
-         --no-enable-prefix-caching \
-         --mm-processor-cache-gb 0 \
-         --chat-template-content-format string \
+         --no-enforce-eager \
          --served-model-name $OCR_MODEL_NAME \
-         --trust-remote-code \
          --port $VLLM_PORT & \
      VLLM_PID=$!; \
      echo \"Waiting for vLLM (PID $VLLM_PID) to become ready on :$VLLM_PORT...\"; \

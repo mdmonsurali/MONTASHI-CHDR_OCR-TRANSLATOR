@@ -8,12 +8,20 @@ from io import BytesIO
 from typing import Dict
 
 
+# Chandra layout labels that carry a raster crop.
+PICTURE_LABELS = {"Image", "Figure", "Picture"}
+
+
+def _is_picture(entry) -> bool:
+    return entry.get("category") in PICTURE_LABELS
+
+
 def deduplicate_pictures(layout_result):
     """Remove duplicate Picture entries with identical bboxes."""
     seen_bboxes = set()
     deduped = []
     for entry in layout_result:
-        if entry.get("category") == "Picture":
+        if _is_picture(entry):
             bbox_tuple = tuple(entry.get("bbox") or [])
             if bbox_tuple not in seen_bboxes:
                 seen_bboxes.add(bbox_tuple)
@@ -41,7 +49,7 @@ def process_pictures(full_result):
         picture_count = 0
 
         for entry in layout_result:
-            if entry.get("category") == "Picture":
+            if _is_picture(entry):
                 picture_count += 1
                 bbox = entry["bbox"]
                 cropped = original_img.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
@@ -50,9 +58,10 @@ def process_pictures(full_result):
                 img_id = f"page{page_idx}_pic{picture_count}_{short}"
                 image_filename = f"{img_id}.png"
 
+                # Preserve the original Chandra label (Image/Figure/Diagram) so
+                # the downstream dispatch and picture-asset upload still match.
                 new_entry = {
                     **entry,
-                    "category": "Picture",
                     "image_obj": cropped,
                     "id": img_id,
                     "image_filename": image_filename,

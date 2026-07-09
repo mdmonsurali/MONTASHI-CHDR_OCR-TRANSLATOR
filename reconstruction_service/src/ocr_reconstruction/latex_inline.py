@@ -102,9 +102,18 @@ _INLINE_RE = re.compile(r"\$(?!\$)(.+?)(?<!\$)\$|\\\((.+?)\\\)", re.DOTALL)
 
 def _take_group(s: str, i: int) -> Tuple[str, int]:
     """If s[i] == '{', return (inner, index_after_close) with brace matching.
-    Otherwise return (single_char, i+1). Assumes i is at the argument start."""
+    If s[i] starts a ``\\command`` (e.g. ``^\\circ``), return the WHOLE command
+    (``\\circ``) — in LaTeX a control word is a single argument, so ``x^\\circ``
+    means the degree sign is the exponent, not a lone backslash. Otherwise
+    return (single_char, i+1). Assumes i is at the argument start."""
     if i >= len(s):
         return "", i
+    if s[i] == "\\":
+        m = re.match(r"\\[A-Za-z]+", s[i:])
+        if m:
+            return m.group(0), i + m.end()
+        # A non-letter control symbol like \, or \{ — take the two chars.
+        return s[i:i + 2], min(len(s), i + 2)
     if s[i] != "{":
         return s[i], i + 1
     depth = 0

@@ -30,7 +30,12 @@ TRANSLATABLE_CATEGORIES = {
 # Categories needing structure-aware handling (HTML / LaTeX): only the
 # human-readable substrings are translated, markup is preserved verbatim.
 TABLE_CATEGORIES = {"Table"}
-FORMULA_CATEGORIES = {"Formula"}
+# Chandra emits block math as "Equation-Block"; "Formula" is the legacy label.
+# Both need structure-aware handling so only human-readable substrings (e.g.
+# \text{...}) are translated and the LaTeX markup (\frac, ^{}, variable names)
+# survives verbatim — otherwise the model rewrites the whole formula as prose
+# and it renders as broken raw LaTeX.
+FORMULA_CATEGORIES = {"Equation-Block", "Formula"}
 # Categories whose text is NOT translated (they carry no natural-language
 # prose). Everything else — including any future/unknown category the OCR
 # emits — is treated as plain prose so nothing slips through untranslated.

@@ -259,7 +259,7 @@ def json_to_docx(layout_results, output_path="output.docx"):
             if e.get("category") == "Table" and e.get("bbox"):
                 pre_reflow_table_bboxes[id(e)] = list(e["bbox"])
 
-            if e.get("category") == "Picture" and e.get("bbox"):
+            if e.get("category") in ("Image", "Figure", "Picture") and e.get("bbox"):
                 e["_orig_bbox"] = list(e["bbox"])
         physical_pages.extend(layout_page(
             entries,
@@ -291,6 +291,16 @@ def json_to_docx(layout_results, output_path="output.docx"):
 
         tables = [e for e in entries if e.get("category") == "Table"]
 
+        def _is_picture(entry) -> bool:
+            # ocr_service emits pictures as Image/Figure (recovered table-cell
+            # photos and diagram crops are also "Image"); "Picture" is accepted
+            # for back-compat. Gating on "Picture" alone silently dropped every
+            # picture from the translated DOCX.
+            cat = entry.get("category")
+            if cat in ("Image", "Figure", "Picture"):
+                return True
+            return cat == "Diagram" and entry.get("image_obj") is not None
+
         def _bbox_inside(inner, outer) -> bool:
             if not inner or not outer or len(inner) != 4 or len(outer) != 4:
                 return False
@@ -310,14 +320,14 @@ def json_to_docx(layout_results, output_path="output.docx"):
 
         standalone_pics = [
             e for e in entries
-            if e.get("category") == "Picture" and not _picture_in_any_table(e)
+            if _is_picture(e) and not _picture_in_any_table(e)
         ]
         # Bucket contained pictures by their owning table so each table
         # renders its own photos inside the matching cell.
         pics_per_table: Dict[int, List[Dict]] = {}
         contained_no_image = []
         for e in entries:
-            if e.get("category") != "Picture":
+            if not _is_picture(e):
                 continue
             pb = e.get("_orig_bbox") or e.get("bbox")
             for t in tables:
@@ -335,7 +345,7 @@ def json_to_docx(layout_results, output_path="output.docx"):
             render_standalone_picture(ctx, entry)
         for entry in entries:
             cat = entry.get("category")
-            if cat == "Picture":
+            if _is_picture(entry):
                 continue
             if cat == "Table":
                 render_table(
@@ -344,7 +354,10 @@ def json_to_docx(layout_results, output_path="output.docx"):
                     pictures_for_table=pics_per_table.get(id(entry)),
                     orig_bbox=pre_reflow_table_bboxes.get(id(entry)),
                 )
-            elif cat == "Formula":
+            elif cat in ("Equation-Block", "Formula"):
+                # Chandra emits block math as "Equation-Block"; "Formula" is the
+                # legacy label. Both must route to the formula renderer, else the
+                # LaTeX (e.g. IMC = \frac{...}) renders as raw text.
                 render_formula(ctx, entry)
             else:
                 render_text_entry(ctx, entry)

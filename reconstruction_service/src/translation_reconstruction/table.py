@@ -72,6 +72,17 @@ class TableHTMLParser(HTMLParser):
                 self.in_header = True
         elif tag == "br" and self.in_cell:
             self.current_cell += "\n"
+        elif tag == "input" and self.in_cell:
+            # OCR marks form checkboxes as <input type="checkbox" [checked]>.
+            # Render the state as a Unicode box glyph so it survives (the parser
+            # otherwise drops the tag and the checked/unchecked state is lost).
+            attr = dict(attrs)
+            # Strip a stray trailing slash the parser can leave on an unquoted
+            # attr (e.g. `type=checkbox/` → `checkbox/`).
+            itype = (attr.get("type") or "checkbox").lower().rstrip("/").strip()
+            if itype in ("checkbox", "radio"):
+                checked = "checked" in attr  # value is "" but key present
+                self.current_cell += "☑" if checked else "☐"
 
     def handle_endtag(self, tag):
         if tag == "table":
@@ -462,7 +473,50 @@ def parse_table_grid(
     max_cols = max(1, min(raw_max, max(modal, content_extent)))
 
     cell_anchors, occupied, _ = _place(max_cols)
+    _merge_duplicate_rowspan_labels(cell_anchors, occupied, max_cols, n_rows)
     return max_cols, n_rows, cell_anchors, occupied
+
+
+def _merge_duplicate_rowspan_labels(
+    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
+    occupied: List[List[bool]],
+    max_cols: int,
+    n_rows: int,
+) -> None:
+    """Merge a section label the OCR duplicated across a header row and the
+    following data row into a single vertically-spanning cell.
+
+    Chandra sometimes emits a repeated sub-header row whose FIRST (row-label)
+    cell duplicates the label of the data row right below it, e.g.::
+
+        <tr><th>Aprovação</th><th>Assinatura</th>…</tr>   (sub-header)
+        <tr><td>Aprovação</td><td>Wang…</td>…</tr>         (data)
+
+    In the source that label is ONE cell spanning both rows (rowspan=2); the
+    duplicate makes the first column read ``Aprovação / Aprovação``. We DON'T
+    change the OCR JSON — we fix it here at render time: when row ``r`` col 0 is a
+    header cell (cs==1) whose text equals row ``r+1`` col 0 (cs==1, non-header),
+    drop the lower cell and give the upper one ``rowspan=2``. Keyed only on the
+    duplication pattern — no table/column/document/language assumptions."""
+    for r in range(n_rows - 1):
+        top = cell_anchors.get((r, 0))
+        bot = cell_anchors.get((r + 1, 0))
+        if not top or not bot:
+            continue
+        t_txt, t_cs, t_rs, t_h = top
+        b_txt, b_cs, b_rs, b_h = bot
+        label = (t_txt or "").strip()
+        if not label or label != (b_txt or "").strip():
+            continue
+        # Only collapse a header→data duplication, single-column, no existing
+        # rowspans that would be disturbed.
+        if t_cs != 1 or b_cs != 1 or t_rs != 1 or b_rs != 1 or not t_h:
+            continue
+        # Merge: keep the upper cell, span it over both rows, drop the lower.
+        cell_anchors[(r, 0)] = (t_txt, t_cs, 2, t_h)
+        del cell_anchors[(r + 1, 0)]
+        if r + 1 < len(occupied) and occupied[r + 1]:
+            occupied[r + 1][0] = True
 
 
 def _assign_pictures_to_cells(
@@ -777,6 +831,26 @@ def _inherit_header_colspans(
         if groups and a < groups[-1][1]:
             continue
         groups.append((a, b))
+
+    # A colspan is only a genuine SUB-COLUMN GROUP if those columns are actually
+    # used as separate columns somewhere — i.e. some row carries distinct
+    # non-empty text in ≥2 of the grouped columns. A wide title/logo/banner cell
+    # (e.g. a `colspan=2` company-name header) spans columns that are otherwise
+    # only ever one label + blanks; collapsing a plain label row under such a
+    # "group" wrongly merges its cells (the 7→6 bug). Keep only real groups.
+    def _is_real_group(a: int, b: int) -> bool:
+        for rr in range(n_rows):
+            filled = sum(
+                1 for c in range(a, b)
+                if (rr, c) in cell_anchors and (cell_anchors[(rr, c)][0] or "").strip()
+            )
+            if filled >= 2:
+                return True
+        return False
+
+    groups = [g for g in groups if _is_real_group(*g)]
+    if not groups:
+        return
 
     for r in range(n_rows):
         for (a, b) in groups:

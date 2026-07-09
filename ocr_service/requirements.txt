@@ -1,6 +1,6 @@
-# Helper script dependencies on top of vllm/vllm-openai:unlimited-ocr base image
-# (transformers, accelerate, huggingface_hub already provided by the base; the
-# baidu/Unlimited-OCR weights are baked into the image, so no HF download here.)
+# Helper script dependencies on top of the vllm/vllm-openai base image
+# (transformers, accelerate, huggingface_hub already provided by the base;
+# datalab-to/chandra-ocr-2 weights are pre-baked at image build time).
 
 # FastAPI app
 fastapi==0.136.3
@@ -14,6 +14,9 @@ openai==2.1.0
 pillow==11.3.0
 PyMuPDF==1.27.2.3
 python-docx==1.2.0
+
+# Chandra layout-HTML parsing
+beautifulsoup4==4.14.0
 
 # Formula rendering
 matplotlib==3.10.9

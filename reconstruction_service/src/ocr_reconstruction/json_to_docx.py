@@ -79,7 +79,7 @@ def _link_table_continuations(layout_results) -> None:
         header_bottoms = [
             (e.get("bbox") or [0, 0, 0, 0])[3]
             for e in entries
-            if e.get("category") == "Page-header"
+            if e.get("category") in ("Page-Header", "Page-header")
         ]
         page_header_y2 = max(header_bottoms) if header_bottoms else 0
 
@@ -197,7 +197,24 @@ def json_to_docx(layout_results, output_path="output.docx"):
             shape_id_start=shape_counter,
         )
 
-        tables = [e for e in entries if e.get("category") == "Table"]
+        # Chandra layout labels. Pictures are Image/Figure (and a Diagram that
+        # actually carries a raster crop); tables are Table; block math is
+        # Equation-Block. "Formula"/"Picture" are accepted for back-compat.
+        def _is_picture(entry) -> bool:
+            cat = entry.get("category")
+            if cat in ("Image", "Figure", "Picture"):
+                return True
+            # A Diagram is only a raster when a crop was attached; otherwise
+            # it's mermaid text and renders through the text path.
+            return cat == "Diagram" and entry.get("image_obj") is not None
+
+        def _is_table(entry) -> bool:
+            return entry.get("category") == "Table"
+
+        def _is_formula(entry) -> bool:
+            return entry.get("category") in ("Equation-Block", "Formula")
+
+        tables = [e for e in entries if _is_table(e)]
 
         def _bbox_inside(inner, outer) -> bool:
             if not inner or not outer or len(inner) != 4 or len(outer) != 4:
@@ -211,14 +228,14 @@ def json_to_docx(layout_results, output_path="output.docx"):
 
         standalone_pics = [
             e for e in entries
-            if e.get("category") == "Picture" and not _picture_in_any_table(e)
+            if _is_picture(e) and not _picture_in_any_table(e)
         ]
         # Bucket contained pictures by their owning table so each table
         # renders its own photos inside the matching cell.
         pics_per_table: Dict[int, List[Dict]] = {}
         contained_no_image = []
         for e in entries:
-            if e.get("category") != "Picture":
+            if not _is_picture(e):
                 continue
             pb = e.get("bbox")
             for t in tables:
@@ -234,18 +251,22 @@ def json_to_docx(layout_results, output_path="output.docx"):
         for entry in standalone_pics:
             render_standalone_picture(ctx, entry)
         for entry in entries:
-            cat = entry.get("category")
-            if cat == "Picture":
+            if _is_picture(entry):
                 continue
-            if cat == "Table":
+            if _is_table(entry):
                 render_table(
                     ctx,
                     entry,
                     pictures_for_table=pics_per_table.get(id(entry)),
                 )
-            elif cat == "Formula":
+            elif _is_formula(entry):
                 render_formula(ctx, entry)
             else:
+                # Every other Chandra label (Text, Section-Header, Caption,
+                # Footnote, Page-Header/Footer, List-Group, Code-Block, Form,
+                # Table-Of-Contents, Bibliography, Complex-Block,
+                # Chemical-Block, a text-only Diagram, or any future label)
+                # renders as a positioned text box — content is never dropped.
                 render_text_entry(ctx, entry)
         # Floating fallback for contained pictures with no image_obj.
         for entry in contained_no_image:

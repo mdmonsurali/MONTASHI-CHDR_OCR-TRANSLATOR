@@ -1,4 +1,4 @@
-"""Unlimited-OCR ocr_service — UUID-based persistence via Postgres + MinIO.
+"""Chandra-OCR ocr_service — UUID-based persistence via Postgres + MinIO.
 
 Exposes:
     GET    /health                              upstream + Postgres + MinIO probe
@@ -44,9 +44,10 @@ from doc_processing import (
     load_pages_from_pdf,
 )
 from ocr_reconstruction import json_to_docx, process_pictures
-from unlimited_ocr_processing import process_image_async, refine_tables_on_page
-from font_attribution import attribute_page
+from chandra_ocr import process_image_async, PICTURE_LABELS
+from chandra_style import attribute_page
 from picture_recovery import recover_missing_pictures
+from cell_picture_recovery import recover_table_cell_pictures
 
 import storage
 
@@ -62,7 +63,7 @@ BATCH_SIZE_NATIVE = int(os.getenv("OCR_BATCH_SIZE_NATIVE", "16"))
 BATCH_SIZE_SCANNED = int(os.getenv("OCR_BATCH_SIZE_SCANNED", "4"))
 BATCH_SIZE_DEFAULT = int(os.getenv("OCR_BATCH_SIZE", "2"))
 
-# Unlimited-OCR emits bboxes in its model canvas (~1024px), not original
+# Chandra emits bboxes normalized 0-1000; chandra_ocr rescales to page pixels.
 INCLUDE_PICTURES = os.getenv("INCLUDE_PICTURES", "false").strip().lower() in {
     "1", "true", "yes", "on",
 }
@@ -117,7 +118,7 @@ async def lifespan(app: FastAPI):
     await storage.close_pool()
 
 
-app = FastAPI(title="Unlimited-OCR Service", version="2.0", lifespan=lifespan)
+app = FastAPI(title="Chandra-OCR Service", version="2.0", lifespan=lifespan)
 
 
 class _SilencePathsFilter(logging.Filter):
@@ -205,11 +206,6 @@ async def _ocr_one_page_async(page_meta: dict, sem: asyncio.Semaphore) -> dict:
         "layout_result": layout,
         "markdown_content": "",
     }
-
-    try:
-        await refine_tables_on_page(page)
-    except Exception as exc:
-        log.warning("[ocr] table refine pass skipped: %s", exc)
     return page
 
 
@@ -232,6 +228,7 @@ _NON_JSON_ENTRY_FIELDS = {
     "image_obj",      # PIL.Image — not JSON-serializable
     "_table_chain",   # back-reference into other entries; would loop
     "_shared_col_weights",  # rebuilt on the next reconstruction pass
+    "_html",          # raw block HTML kept only for style attribution
 }
 
 
@@ -257,7 +254,7 @@ async def _upload_picture_assets(doc_id: _uuid.UUID, pages: List[dict]) -> List[
     tasks: list = []
     for page in pages:
         for entry in page.get("layout_result", []):
-            if entry.get("category") != "Picture":
+            if entry.get("category") not in PICTURE_LABELS:
                 continue
             img = entry.get("image_obj")
             fname = entry.get("image_filename")
@@ -312,22 +309,40 @@ async def _run_pipeline(in_path: Path, source_bytes: bytes, original_name: str,
         # sits inside an already-detected Table bbox.
         if INCLUDE_PICTURES:
             recover_missing_pictures(pages)
+            # Recover photos Chandra emitted as bare <img alt> placeholders in
+            # table cells (scanned pages / image inputs have no embedded raster
+            # for recover_missing_pictures to find). Crops them from the page
+            # raster by content-blob detection down each image column.
+            recover_table_cell_pictures(pages)
 
         if not INCLUDE_PICTURES:
             for page in pages:
-                page["layout_result"] = [
-                    e for e in page["layout_result"]
-                    if e.get("category") != "Picture"
-                ]
+                kept = []
+                for e in page["layout_result"]:
+                    if e.get("category") not in PICTURE_LABELS:
+                        kept.append(e)
+                    elif e.get("source") == "diagram-recovered":
+                        # A Diagram we relabelled to Image for cropping: with
+                        # pictures off, revert to a Diagram text block so the
+                        # mermaid content still renders instead of vanishing.
+                        e["category"] = "Diagram"
+                        e.pop("image_obj", None)
+                        kept.append(e)
+                    # else: a real picture — drop it (pictures are off).
+                page["layout_result"] = kept
 
         if ATTRIBUTE_STYLES:
             _attribute_styles(pages)
 
-        for page in pages:
-            page["markdown_content"] = layoutjson2md(page["original_image"], page["layout_result"])
+        # Crop + upload pictures first so each entry carries image_url before
+        # the markdown serializer runs — that lets the markdown reference the
+        # stored crop (images/{filename}) instead of a static placeholder.
         if INCLUDE_PICTURES:
             pages = process_pictures(pages)
             pages = await _upload_picture_assets(doc_id, pages)
+
+        for page in pages:
+            page["markdown_content"] = layoutjson2md(page["original_image"], page["layout_result"])
 
         md_text = "\n\n".join(p["markdown_content"] for p in pages)
         layout_json = [_page_envelope_for_json(p) for p in pages]

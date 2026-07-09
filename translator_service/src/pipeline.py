@@ -22,6 +22,13 @@ TRANSLATE_TARGET_LANG = os.environ.get("TRANSLATE_TARGET_LANG", "pt-BR")
 
 SUPPORTED_EXTS = {".pdf", ".docx", ".jpg", ".jpeg", ".png"}
 
+# Categories that carry a stored picture asset (image_url) to re-hydrate. Must
+# match the labels ocr_service emits: standalone Image/Figure blocks, recovered
+# table-cell photos and diagram crops (all "Image"), and legacy "Picture". The
+# reconstruction renderer treats all of these as pictures, so hydrating only
+# "Picture" silently dropped every Image/Figure from the translated DOCX.
+PICTURE_CATEGORIES = {"Image", "Figure", "Picture"}
+
 
 def _guard_translation(stats: dict, *, original_name: str) -> None:
     """Raise if translation had work to do but produced nothing usable.
@@ -137,7 +144,7 @@ async def _hydrate_pictures(layout: List[dict], doc_id: str, user_id: _uuid.UUID
 
     for page in layout:
         for entry in page.get("entries") or []:
-            if entry.get("category") != "Picture":
+            if entry.get("category") not in PICTURE_CATEGORIES:
                 continue
             url = entry.get("image_url")
             if not url:
@@ -160,7 +167,7 @@ async def _hydrate_pictures_from_minio(layout: List[dict],
 
     for page in layout:
         for entry in page.get("entries") or []:
-            if entry.get("category") != "Picture":
+            if entry.get("category") not in PICTURE_CATEGORIES:
                 continue
             url = entry.get("image_url")
             if not url:

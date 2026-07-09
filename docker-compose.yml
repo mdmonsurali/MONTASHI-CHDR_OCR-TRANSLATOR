@@ -5,7 +5,10 @@ services:
     build:
       context: .
       dockerfile: ocr_service/Dockerfile
-    image: unlimited-ocr:local
+      args:
+        HF_TOKEN: ${HF_TOKEN:-}
+        CHANDRA_MODEL: ${CHANDRA_MODEL:-datalab-to/chandra-ocr-2}
+    image: chandra-ocr:local
     container_name: ocr_service
     ports:
       - "${VLLM_PORT:-8888}:8888"
@@ -13,14 +16,16 @@ services:
       - VLLM_PORT=${VLLM_PORT:-8888}
       - VLLM_SERVICE_URL=http://localhost:${VLLM_PORT:-8888}
       - OCR_SERVICE_PORT=${OCR_SERVICE_PORT:-8001}
+      - OCR_MODEL_NAME=${OCR_MODEL_NAME:-chandra}
+      - CHANDRA_MODEL=${CHANDRA_MODEL:-datalab-to/chandra-ocr-2}
       - GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.50}
       - MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
       - VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8}
       - OCR_BATCH_SIZE=${OCR_BATCH_SIZE:-2}
       - OCR_BATCH_SIZE_NATIVE=${OCR_BATCH_SIZE_NATIVE:-16}
       - OCR_BATCH_SIZE_SCANNED=${OCR_BATCH_SIZE_SCANNED:-4}
-      - OCR_MAX_TOKENS=${OCR_MAX_TOKENS:-32000}
-      - OCR_IMAGE_MODE=${OCR_IMAGE_MODE:-base}
+      - OCR_MAX_TOKENS=${OCR_MAX_TOKENS:-12384}
+      - OCR_MAX_RETRIES=${OCR_MAX_RETRIES:-6}
       - INCLUDE_PICTURES=${INCLUDE_PICTURES:-true}
       - ATTRIBUTE_STYLES=${ATTRIBUTE_STYLES:-true}
       - FORMULA_SIZE_MULTIPLIER=${FORMULA_SIZE_MULTIPLIER:-1.6}

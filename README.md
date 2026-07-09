@@ -85,7 +85,7 @@ Default ports (overridable via `.env`):
 | MinIO console | `${MINIO_CONSOLE_PORT:-9001}` |
 
 `ocr_service`, `orchestrator_service`, and `translator_service` are reached
-through the internal unlimited OCR Docker network (`ocr-network`) rather than exposed
+through the internal Docker network (`ocr-network`) rather than exposed
 directly; `ui_service` is the public entry point.
 
 ## Key routes
