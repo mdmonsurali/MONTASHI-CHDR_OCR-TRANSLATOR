@@ -20,6 +20,9 @@ class ShapeContext:
         self.zoom = zoom
         self.next_id = shape_id_start
         self.xml_chunks: List[str] = []
+        # Reflowed entries for the current page; set by json_to_docx so per-entry
+        # renderers can be obstacle-aware. Empty when not provided.
+        self.page_entries: List = []
 
     def _next_id(self) -> int:
         self.next_id += 1

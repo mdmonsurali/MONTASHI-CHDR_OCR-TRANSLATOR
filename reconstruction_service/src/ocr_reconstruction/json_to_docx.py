@@ -22,6 +22,66 @@ from .text_entry import render_text_entry
 from .shape_context import ShapeContext
 
 
+# Label categories that title the table they sit above. When OCR places one so
+# it vertically overlaps a Table (its title dropped inside the table's top), we
+# lift it back above the table. (Ported from the translator reflow path.)
+_OVERLAP_RESOLVE_CATEGORIES = {"Caption", "Title", "Section-header", "Section-Header"}
+# Gap (pt, scaled by zoom) kept between a lifted caption's bottom and table top.
+_TABLE_GAP_PT = 4.0
+
+
+def _lift_captions_above_overlapping_tables(entries: List[Dict], zoom: float) -> None:
+    """Move any caption/title/section-header that VERTICALLY OVERLAPS a Table to
+    sit just ABOVE that table's top edge (captions label the table below them).
+    Pure bbox translation — no cascade, no scaling — and a strict no-op when
+    nothing overlaps. Keys only on category + geometry.
+
+    A Caption/Title/Section-header is a BLOCK-LEVEL label, never a table cell
+    (cell text lives inside the table's own HTML), so a separate label entry that
+    overlaps a table is always a mis-placed title, not a legitimate in-table
+    label. Only a label already entirely above the table is left alone. When a
+    label overlaps several tables it is lifted above the topmost overlapping one.
+    """
+    tables = [
+        e for e in entries
+        if e.get("category") == "Table"
+        and e.get("bbox") and len(e["bbox"]) == 4
+    ]
+    if not tables:
+        return
+    gap_px = _TABLE_GAP_PT * zoom
+    for e in entries:
+        if e.get("category") not in _OVERLAP_RESOLVE_CATEGORIES:
+            continue
+        eb = e.get("bbox")
+        if not eb or len(eb) != 4:
+            continue
+        ex1, ey1, ex2, ey2 = [float(v) for v in eb]
+        target_top = None
+        for t in tables:
+            tx1, ty1, tx2, ty2 = [float(v) for v in t["bbox"]]
+            # Already entirely above the table → nothing to fix.
+            if ey2 <= ty1:
+                continue
+            # Must share a horizontal band (sits over the table) AND overlap
+            # vertically (dropped into it) to count as an overlap to resolve.
+            if not (ex1 < tx2 and ex2 > tx1):
+                continue
+            if not (ey1 < ty2 and ey2 > ty1):
+                continue
+            if target_top is None or ty1 < target_top:
+                target_top = ty1  # lift above this table's top
+        if target_top is None:
+            continue
+        ch = ey2 - ey1
+        new_bottom = target_top - gap_px
+        new_top = new_bottom - ch
+        if new_top < 0.0:            # clamp to page top; still clears the table
+            new_top = 0.0
+            new_bottom = ch
+        e["bbox"] = [ex1, new_top, ex2, new_bottom]
+
+
 def _parse_table_entry_rows(entry: Dict):
     """Parse the table HTML on `entry` into rows. None when not a table or
     when parsing yields nothing."""
@@ -98,7 +158,7 @@ def _link_table_continuations(layout_results) -> None:
                 continue
             text = (entry.get("text") or "").strip()
             has_thead = "<thead" in text.lower()
-            max_cols, n_rows, cell_anchors, _occ = parse_table_grid(rows)
+            max_cols, n_rows, cell_anchors, _occ, _img = parse_table_grid(rows)
 
             bbox = entry.get("bbox") or [0, 0, 0, 0]
             tbl_top = bbox[1] if len(bbox) >= 2 else 0
@@ -188,6 +248,11 @@ def json_to_docx(layout_results, output_path="output.docx"):
 
         page_w_pt = float(page["page_width_pt"])
         page_zoom = float(page["zoom"])
+
+        # De-overlap pass: OCR sometimes drops a table's caption/title so its
+        # bbox falls inside the table's top edge. Lift it back above the table
+        # before any entry is positioned (strict no-op when nothing overlaps).
+        _lift_captions_above_overlapping_tables(entries, page_zoom)
 
         ctx = ShapeContext(
             doc,

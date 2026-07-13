@@ -48,6 +48,7 @@ from chandra_ocr import process_image_async, PICTURE_LABELS
 from chandra_style import attribute_page
 from picture_recovery import recover_missing_pictures
 from cell_picture_recovery import recover_table_cell_pictures
+from table_reocr import recover_dropped_table_rows
 
 import storage
 
@@ -68,6 +69,12 @@ INCLUDE_PICTURES = os.getenv("INCLUDE_PICTURES", "false").strip().lower() in {
     "1", "true", "yes", "on",
 }
 ATTRIBUTE_STYLES = os.getenv("ATTRIBUTE_STYLES", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+# Re-OCR a table's crop when Chandra dropped a row+image on the full-page pass
+# (embedded rasters inside the table exceed its <img> cells). Default on; issues
+# extra model calls only for the affected tables.
+REOCR_DROPPED_ROWS = os.getenv("OCR_REOCR_DROPPED_ROWS", "true").strip().lower() in {
     "1", "true", "yes", "on",
 }
 
@@ -308,6 +315,12 @@ async def _run_pipeline(in_path: Path, source_bytes: bytes, original_name: str,
         # info to recover from) and only injects pictures whose PDF bbox
         # sits inside an already-detected Table bbox.
         if INCLUDE_PICTURES:
+            # First repair any table where Chandra dropped a row+image on the
+            # full-page pass (embedded rasters > <img> cells): re-OCR the table
+            # crop and swap in the fuller HTML. Runs BEFORE recovery so the
+            # recovered pictures map onto the corrected grid.
+            if REOCR_DROPPED_ROWS:
+                await recover_dropped_table_rows(pages)
             recover_missing_pictures(pages)
             # Recover photos Chandra emitted as bare <img alt> placeholders in
             # table cells (scanned pages / image inputs have no embedded raster

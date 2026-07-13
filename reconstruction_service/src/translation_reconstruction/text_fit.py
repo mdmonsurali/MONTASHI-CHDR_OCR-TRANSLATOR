@@ -193,6 +193,17 @@ def get_font(size_px: int, bold: bool = False) -> Optional["ImageFont.FreeTypeFo
     return f
 
 
+# Anchored text boxes are emitted with lIns=rIns=0 (see
+# ooxml.build_anchored_textbox_xml → bodyPr), so the usable text width of such a
+# box IS its full geometric width. Callers that render into those boxes pass this
+# as a FIXED per-box edge pad (Word's line-fill rounding only), instead of the
+# proportional `* width_safety` haircut — which, on a wide box, discarded more
+# than a whole word and wrapped text to a new line where Word keeps it on one.
+# Keep in sync with ooxml.py bodyPr insets: if those become non-zero, set this to
+# (lIns + rIns) in points.
+_TEXTBOX_EDGE_PAD_PT = 2.0
+
+
 _CJK_RE = re.compile(
     r"[\u1100-\u11ff\u2e80-\u2eff\u3000-\u303f\u3040-\u30ff\u3130-\u318f"
     r"\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7af\uf900-\ufaff"
@@ -275,11 +286,19 @@ def _wrapped_lines_if_fit(
     width_safety: float = 0.93,
     height_safety: float = 1.10,
     bold: bool = False,
+    edge_pad_px: Optional[float] = None,
 ) -> Optional[List[str]]:
     font = get_font(size_px, bold=bold)
     if font is None:
         return None
-    lines = wrap_to_width(text, font, box_w_px * width_safety, size_px)
+    # `edge_pad_px` (fixed reserve) models a real zero-inset text box; when not
+    # supplied, fall back to the legacy proportional haircut so every existing
+    # caller (e.g. the table path) is byte-for-byte unchanged.
+    wrap_w = (
+        max(1.0, box_w_px - edge_pad_px) if edge_pad_px is not None
+        else box_w_px * width_safety
+    )
+    lines = wrap_to_width(text, font, wrap_w, size_px)
     for line in lines:
         if measure_width_px(line, font, size_px) > box_w_px:
             return None
@@ -354,6 +373,7 @@ def fit_multiline(
     min_size_pt: float = 6.0,  # Increased from 1.0 to enforce a readable floor layout
     dpi: int = 72,
     bold: bool = False,
+    edge_pad_pt: float = 0.0,
 ) -> Tuple[float, Optional[List[str]]]:
     if not text.strip() or box_w_pt <= 0 or box_h_pt <= 0 or _FONT_PATH is None:
         return max_size_pt, None
@@ -361,11 +381,16 @@ def fit_multiline(
     pt_to_px = dpi / 72.0
     box_w_px = box_w_pt * pt_to_px
     box_h_px = box_h_pt * pt_to_px
+    # A positive `edge_pad_pt` switches wrapping to the FIXED zero-inset text-box
+    # model (usable width = full width − pad); the default 0.0 keeps the legacy
+    # proportional haircut, so all existing callers are unchanged.
+    edge_pad_px = (edge_pad_pt * pt_to_px) if edge_pad_pt > 0 else None
     hi = max(min_size_pt, max_size_pt)
     lo = min_size_pt
 
     hi_lines = _wrapped_lines_if_fit(
         text, int(round(hi * pt_to_px)), box_w_px, box_h_px, bold=bold,
+        edge_pad_px=edge_pad_px,
     )
     if hi_lines is not None:
         return float(hi), hi_lines
@@ -377,6 +402,7 @@ def fit_multiline(
         size_px = max(1, int(round(mid * pt_to_px)))
         lines = _wrapped_lines_if_fit(
             text, size_px, box_w_px, box_h_px, bold=bold,
+            edge_pad_px=edge_pad_px,
         )
         if lines is not None:
             best_size, best_lines = mid, lines

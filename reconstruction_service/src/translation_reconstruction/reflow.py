@@ -57,7 +57,9 @@ def _hugged_x2(entry: Dict, zoom: float, x1: float, x2_cur: float) -> Optional[f
     current width so this can only narrow, never widen (widening for overflow
     is handled separately).
     """
-    from .text_fit import fit_multiline, get_font, measure_width_px
+    from .text_fit import (
+        fit_multiline, get_font, measure_width_px, _TEXTBOX_EDGE_PAD_PT,
+    )
 
     text = (entry.get("text") or "").strip()
     if not text:
@@ -71,6 +73,7 @@ def _hugged_x2(entry: Dict, zoom: float, x1: float, x2_cur: float) -> Optional[f
     box_w_pt = max(1.0, (x2_cur - x1) / zoom)
     size_pt, lines = fit_multiline(
         text, box_w_pt, 10000.0, max_size_pt=base, min_size_pt=6.0, bold=bold,
+        edge_pad_pt=_TEXTBOX_EDGE_PAD_PT,
     )
     if not lines:
         return None
@@ -80,7 +83,9 @@ def _hugged_x2(entry: Dict, zoom: float, x1: float, x2_cur: float) -> Optional[f
         return None
     longest_pt = max(measure_width_px(ln, font, size_px) for ln in lines)
     one_char_pt = measure_width_px("M", font, size_px)  # one-letter pad
-    hug_w_pt = longest_pt / _WIDTH_SAFETY + one_char_pt
+    # Fixed edge pad (zero-inset text box), consistent with the fitter — the old
+    # `/ _WIDTH_SAFETY` inflated the hug width ~7.5% and over-widened the box.
+    hug_w_pt = longest_pt + _TEXTBOX_EDGE_PAD_PT + one_char_pt
     return x1 + hug_w_pt * zoom
 
 
@@ -88,7 +93,7 @@ def _needed_height_px(entry: Dict, zoom: float) -> Optional[float]:
     """Return the pixel height that fit_multiline says the translated text
     needs at the entry's current (possibly already grown) width, or None if
     measurement is not possible."""
-    from .text_fit import fit_multiline
+    from .text_fit import fit_multiline, _TEXTBOX_EDGE_PAD_PT
 
     text = (entry.get("text") or "").strip()
     if not text:
@@ -115,6 +120,7 @@ def _needed_height_px(entry: Dict, zoom: float) -> Optional[float]:
         max_size_pt=base_size_pt,
         min_size_pt=6.0,
         bold=bold,
+        edge_pad_pt=_TEXTBOX_EDGE_PAD_PT,
     )
     if not lines:
         return None
@@ -138,6 +144,67 @@ def _vertical_band_overlap(a, b) -> bool:
     whether a neighbour actually sits beside this box (same horizontal band)
     versus merely above or below it."""
     return a[1] < b[3] and a[3] > b[1]
+
+
+# Label categories that title the table they sit above. When OCR places one so
+# it vertically overlaps a Table (its title dropped inside the table's top), we
+# lift it back above the table.
+_OVERLAP_RESOLVE_CATEGORIES = {"Caption", "Title", "Section-header", "Section-Header"}
+# Gap (pt, scaled by zoom) kept between a lifted caption's bottom and table top.
+_TABLE_GAP_PT = 4.0
+
+
+def _lift_captions_above_overlapping_tables(valid: List[Dict], zoom: float) -> None:
+    """Move any caption/title/section-header that VERTICALLY OVERLAPS a Table to
+    sit just ABOVE that table's top edge (captions label the table below them).
+    Pure bbox translation — no cascade, no scaling — and a strict no-op when
+    nothing overlaps. Keys only on category + geometry.
+
+    A Caption/Title/Section-header is a BLOCK-LEVEL label, never a table cell
+    (cell text lives inside the table's own HTML), so a separate label entry that
+    overlaps a table is always a mis-placed title, not a legitimate in-table
+    label — we do NOT treat geometric containment as a reason to leave it. Only a
+    label already entirely above the table is left alone. When a label overlaps
+    several tables it is lifted above the topmost overlapping one."""
+    tables = [
+        e for e in valid
+        if e.get("category") == "Table"
+        and e.get("bbox") and len(e["bbox"]) == 4
+    ]
+    if not tables:
+        return
+    gap_px = _TABLE_GAP_PT * zoom
+    for e in valid:
+        if e.get("category") not in _OVERLAP_RESOLVE_CATEGORIES:
+            continue
+        eb = e.get("bbox")
+        if not eb or len(eb) != 4:
+            continue
+        ex1, ey1, ex2, ey2 = [float(v) for v in eb]
+        target_top: Optional[float] = None
+        for t in tables:
+            tx1, ty1, tx2, ty2 = [float(v) for v in t["bbox"]]
+            # Already entirely above the table → nothing to fix.
+            if ey2 <= ty1:
+                continue
+            # Must share a horizontal band (sits over the table) AND overlap
+            # vertically (dropped into it) to count as an overlap to resolve.
+            if not (ex1 < tx2 and ex2 > tx1):
+                continue
+            if not (ey1 < ty2 and ey2 > ty1):
+                continue
+            ty1_target = ty1  # lift above this table's top
+            if target_top is None or ty1_target < target_top:
+                target_top = ty1_target
+        if target_top is None:
+            continue
+        ch = ey2 - ey1
+        new_bottom = target_top - gap_px
+        new_top = new_bottom - ch
+        if new_top < 0.0:            # clamp to page top; still clears the table
+            new_top = 0.0
+            new_bottom = ch
+        e["bbox"] = [ex1, new_top, ex2, new_bottom]
 
 
 def _min_width_x2_for_height(
@@ -263,6 +330,10 @@ def reflow_page_entries(
     page_h_px = page_h_pt * zoom
     page_w_px = page_w_pt * zoom
     gap_px = _GAP_PT * zoom
+
+    # Resolve OCR-placed caption/title overlaps with tables BEFORE sorting, so
+    # the corrected top edge participates in the top-to-bottom cascade below.
+    _lift_captions_above_overlapping_tables(valid, zoom)
 
     fixed_entries = [e for e in valid if e.get("category") in _FIXED_CATEGORIES]
     cascade_entries = [e for e in valid if e.get("category") not in _FIXED_CATEGORIES]

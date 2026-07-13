@@ -22,6 +22,28 @@ TRANSLATE_RETRY_ONCE = os.getenv("TRANSLATE_RETRY_ONCE", "true").lower() == "tru
 # detect when the LLM merges or splits entries (count mismatch → per-item retry).
 _ENTRY_SEP = "<<<ENTRY_SEP>>>"
 
+# Form-checkbox glyphs (from the OCR ``<input type=checkbox>`` conversion) that
+# appear in standalone prose blocks like "是否合格： ☑是 ☐否". They are symbols,
+# not words, and an LLM asked to translate the prose can silently drop or
+# reorder them. We MASK each glyph to an ASCII sentinel the model treats as a
+# code (kept verbatim) before translation and RESTORE it after — so the checked/
+# unchecked state always survives. Keyed on glyph TYPE, so restore is
+# order-independent (every checked sentinel → ☑ regardless of reordering).
+_CHECKBOX_GLYPHS = {"☑": "[[CBX_ON]]", "☐": "[[CBX_OFF]]"}
+_CHECKBOX_UNMASK = {v: k for k, v in _CHECKBOX_GLYPHS.items()}
+
+
+def _mask_checkbox_glyphs(s: str) -> str:
+    for g, tok in _CHECKBOX_GLYPHS.items():
+        s = s.replace(g, tok)
+    return s
+
+
+def _unmask_checkbox_glyphs(s: str) -> str:
+    for tok, g in _CHECKBOX_UNMASK.items():
+        s = s.replace(tok, g)
+    return s
+
 # Plain-prose categories: the whole `text` field is translated as-is.
 TRANSLATABLE_CATEGORIES = {
     "Text", "Title", "Page-header", "Page-footer", "Section-header",
@@ -369,7 +391,9 @@ async def translate_layout(layout: List[dict], target_lang: str = "pt-BR") -> di
     pass a copy if you need the original.
     """
     units, finalizers = _collect_units(layout)
-    sources = [u.text for u in units]
+    # Mask form-checkbox glyphs so the model preserves them verbatim (see
+    # _mask_checkbox_glyphs). Restored on every result before write-back below.
+    sources = [_mask_checkbox_glyphs(u.text) for u in units]
     if not sources:
         return {"items_translated": 0, "chunks": 0, "failed": 0}
 
@@ -404,9 +428,10 @@ async def translate_layout(layout: List[dict], target_lang: str = "pt-BR") -> di
     # guarantees no Chinese is left behind in any category.
     retried, untranslated = await _retry_residual_cjk(sources, flat, target_lang)
 
-    # Write each translated string back to its origin.
+    # Write each translated string back to its origin, restoring any masked
+    # checkbox glyphs (☑/☐) the model kept as ASCII sentinels.
     for unit, translated in zip(units, flat):
-        unit.write(translated)
+        unit.write(_unmask_checkbox_glyphs(translated))
 
     # Rebuild structured entries (tables / formulas) from their parts.
     for entry, parts in finalizers:

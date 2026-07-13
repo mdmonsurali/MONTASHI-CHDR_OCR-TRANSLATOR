@@ -20,7 +20,8 @@ from .ooxml import (
     build_inline_picture_xml, add_image_relationship,
 )
 from .text_fit import (
-    fit_multiline, get_font, is_cjk_char, wrap_to_width,
+    fit_multiline, get_font, is_cjk_char, wrap_to_width, has_cjk,
+    measure_width_px,
 )
 
 
@@ -36,10 +37,11 @@ class TableHTMLParser(HTMLParser):
         super().__init__()
         self.tables = []
         self.current_table = []
-        self.current_row: List[Tuple[str, int, int]] = []
+        self.current_row: List[Tuple[str, int, int, int]] = []
         self.current_cell = ""
         self.current_colspan = 1
         self.current_rowspan = 1
+        self.current_imgs = 0
         self.in_table = False
         self.in_row = False
         self.in_cell = False
@@ -68,10 +70,17 @@ class TableHTMLParser(HTMLParser):
             self.current_cell = ""
             self.current_colspan = self._attr_int(attrs, "colspan", 1)
             self.current_rowspan = self._attr_int(attrs, "rowspan", 1)
+            self.current_imgs = 0
             if tag == "th":
                 self.in_header = True
         elif tag == "br" and self.in_cell:
             self.current_cell += "\n"
+        elif tag == "img" and self.in_cell:
+            # <img> placeholders (e.g. table-cell diagrams Chandra emits as a
+            # bare <img alt=...>) carry no visible text but authoritatively mark
+            # WHICH cell holds a picture and HOW MANY. Count them per cell so the
+            # recovered Image entries can be assigned to the right cell later.
+            self.current_imgs += 1
         elif tag == "input" and self.in_cell:
             # OCR marks form checkboxes as <input type="checkbox" [checked]>.
             # Render the state as a Unicode box glyph so it survives (the parser
@@ -100,10 +109,12 @@ class TableHTMLParser(HTMLParser):
                 self.current_cell.strip(),
                 self.current_colspan,
                 self.current_rowspan,
+                self.current_imgs,
             ))
             self.current_cell = ""
             self.current_colspan = 1
             self.current_rowspan = 1
+            self.current_imgs = 0
 
     def handle_data(self, data):
         if self.in_cell:
@@ -123,9 +134,11 @@ class TableHTMLParser(HTMLParser):
                 self.current_cell.strip(),
                 self.current_colspan,
                 self.current_rowspan,
+                self.current_imgs,
             ))
             self.in_cell = False
             self.current_cell = ""
+            self.current_imgs = 0
         if self.current_row:
             self.current_table.append((self.current_row, self.in_header))
             self.current_row = []
@@ -143,14 +156,29 @@ MAX_TABLE_ROWS = 200
 MAX_TABLE_COLS = 40
 
 
+def _cell_parts(cell) -> Tuple[str, int, int, int]:
+    """Unpack a parsed cell tuple tolerantly as (text, colspan, rowspan,
+    img_count). Cells produced by `TableHTMLParser` carry 4 fields, but
+    Markdown-derived and rebuilt cells may still be 3-tuples — default
+    img_count to 0 for those."""
+    if len(cell) >= 4:
+        t, cs, rs, imgs = cell[0], cell[1], cell[2], cell[3]
+    else:
+        t, cs, rs = cell[0], cell[1], cell[2]
+        imgs = 0
+    return t, cs, rs, imgs
+
+
 def parse_html_table_rows(
     html_string: str,
-) -> List[Tuple[List[Tuple[str, int, int]], bool]]:
+) -> List[Tuple[List[Tuple[str, int, int, int]], bool]]:
     """Return a flat list of (cells, is_header) pairs across all tables found.
 
-    Each cell is `(text, colspan, rowspan)`. Robust to truncated HTML (missing
-    closing tags) and to runaway/degenerate OCR output: consecutive byte-
-    identical rows are collapsed and the total row count is capped.
+    Each cell is `(text, colspan, rowspan, img_count)` — `img_count` is the
+    number of `<img>` placeholders inside the cell (0 for text-only cells).
+    Robust to truncated HTML (missing closing tags) and to runaway/degenerate
+    OCR output: consecutive byte-identical rows are collapsed and the total row
+    count is capped.
     """
     parser = TableHTMLParser()
     try:
@@ -159,12 +187,12 @@ def parse_html_table_rows(
         pass
     parser.finalize()   # recover any table left open by truncated HTML
 
-    rows: List[Tuple[List[Tuple[str, int, int]], bool]] = []
+    rows: List[Tuple[List[Tuple[str, int, int, int]], bool]] = []
     prev_sig = None
     for table in parser.tables:
         for row, is_header in table:
             # Collapse runs of identical rows (a common hallucination shape).
-            sig = tuple((t, cs, rs) for (t, cs, rs) in row)
+            sig = tuple(_cell_parts(c) for c in row)
             if sig == prev_sig:
                 continue
             prev_sig = sig
@@ -172,6 +200,98 @@ def parse_html_table_rows(
             if len(rows) >= MAX_TABLE_ROWS:
                 return rows
     return rows
+
+
+# ── Non-table HTML around a table ─────────────────────────────────────────────
+# A single OCR "Table" entry frequently carries MORE than the ``<table>`` grid:
+# form checkboxes, review paragraphs, signatures, comments, etc. emitted as
+# ``<p>``/``<br>``/``<input>``/``<u>`` after (or before) the table. Rendering
+# only the grid silently drops all of it. These helpers extract that surrounding
+# HTML and flatten it to plain text so it can be rendered below the table. The
+# flattening is GENERAL — it is not tied to any particular document, language or
+# checkbox wording.
+
+_TABLE_BLOCK_RE = re.compile(r"<table\b.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+
+
+class _HTMLToTextParser(HTMLParser):
+    """Flatten an arbitrary HTML fragment to plain text.
+
+    Handles the constructs OCR emits around tables generically:
+      * ``<input type=checkbox|radio [checked]>`` → ``☑`` / ``☐`` (state kept);
+      * ``<br>`` and block boundaries (``</p>``, ``</div>``, ``<li>``, ``</tr>``)
+        → newlines so the layout survives;
+      * every other tag is dropped but its text is kept;
+      * HTML entities are unescaped (handled by HTMLParser.handle_data for
+        charrefs via ``convert_charrefs=True``).
+    Runs of blank lines are collapsed and leading/trailing space trimmed.
+    """
+    _BLOCK_TAGS = {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._buf: List[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "br":
+            self._buf.append("\n")
+        elif tag == "input":
+            attr = dict(attrs)
+            itype = (attr.get("type") or "checkbox").lower().rstrip("/").strip()
+            if itype in ("checkbox", "radio"):
+                self._buf.append("☑" if "checked" in attr else "☐")
+        elif tag in self._BLOCK_TAGS:
+            self._buf.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        # e.g. self-closing ``<input .../>`` / ``<br/>``
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self._BLOCK_TAGS:
+            self._buf.append("\n")
+
+    def handle_data(self, data):
+        self._buf.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._buf)
+        # Collapse intra-line whitespace, keep newlines, drop blank-line runs.
+        lines = [re.sub(r"[ \t ]+", " ", ln).strip() for ln in raw.split("\n")]
+        out: List[str] = []
+        for ln in lines:
+            if ln or (out and out[-1]):
+                out.append(ln)
+        return "\n".join(out).strip()
+
+
+def html_fragment_to_text(fragment: str) -> str:
+    """Plain-text rendering of a non-table HTML ``fragment`` (checkbox glyphs,
+    line breaks preserved). Returns ``""`` when the fragment has no visible
+    text."""
+    if not fragment or not fragment.strip():
+        return ""
+    p = _HTMLToTextParser()
+    try:
+        p.feed(fragment)
+    except Exception:
+        pass
+    return p.get_text()
+
+
+def extract_non_table_text(text: str) -> str:
+    """Return the plain text of everything in ``text`` OUTSIDE its ``<table>``
+    block(s), in source order (content before the first table, between tables,
+    and after the last), flattened via `html_fragment_to_text`.
+
+    Empty when the entry is a bare table with no surrounding content — so the
+    common case stays a pure table render with zero behavioural change.
+    """
+    if not text or "<table" not in text.lower():
+        return ""
+    outside = _TABLE_BLOCK_RE.sub("\n", text)
+    return html_fragment_to_text(outside)
 
 
 def parse_markdown_table(md_text: str) -> Optional[List[List[str]]]:
@@ -228,6 +348,35 @@ def _longest_token_width(s: str) -> int:
     return best
 
 
+def _longest_word_px(s: str, font, size_px: int) -> float:
+    """Pixel width of the longest UNBREAKABLE run in `s` at the render font.
+
+    Sibling of `_longest_token_width` but measured in pixels (not display-unit
+    char counts) so it can be compared directly to a column's usable width. Word
+    can only break at whitespace, newlines, or between CJK glyphs, so we split on
+    exactly those and measure each maximal non-CJK sub-run. A pure-CJK string has
+    no unbreakable run wider than a single glyph, so it is never flagged as
+    overflowing (CJK columns stay freely squeezable)."""
+    if not s:
+        return 0.0
+    best = 0.0
+    for line in s.split("\n"):
+        for run in re.split(r"\s+", line):
+            if not run:
+                continue
+            sub = ""
+            for ch in run:
+                if is_cjk_char(ch):
+                    if sub:
+                        best = max(best, measure_width_px(sub, font, size_px))
+                        sub = ""
+                else:
+                    sub += ch
+            if sub:
+                best = max(best, measure_width_px(sub, font, size_px))
+    return best
+
+
 # A short "label" (header, code, category) should sit on at most this many
 # lines instead of collapsing into a tall vertical strip.
 _LABEL_MAX_LINES = 2
@@ -244,6 +393,24 @@ _CELL_MAX_LINES = 16
 # weight (75th percentile) covers the rest, and the redistribution loop
 # balances against the other columns.
 _CELL_MIN_WIDTH_CAP = 22
+
+# Word's DEFAULT table-cell margin is 108 twips = 5.4 pt on the left and right of
+# every cell (top/bottom default to 0). We pin exactly these margins in the
+# emitted `<w:tblCellMar>` so the render is deterministic, and subtract them here
+# as a FIXED amount when computing a cell's usable text width. The old
+# proportional `cell_w_pt * 0.93` under-reserved space for any column narrower
+# than ~150 pt (7% of a narrow column is less than the fixed 10.8 pt Word
+# removes), so those columns wrapped to one more line than the fitter predicted
+# and clipped under `hRule="exact"`.
+_CELL_MARGIN_PT = 5.4
+
+
+def _usable_w_pt(cell_w_pt: float) -> float:
+    """Usable text width (pt) inside a cell whose grid width is `cell_w_pt`,
+    after Word's fixed left+right cell margins. Used by EVERY wrap measurement
+    (overflow gate, column balancer, initial row-line estimate, final emission)
+    so they can never disagree about how wide a cell's text area is."""
+    return max(1.0, cell_w_pt - 2.0 * _CELL_MARGIN_PT)
 
 
 def _content_min_width(s: str) -> int:
@@ -316,13 +483,13 @@ def _normalize_column_granularity(
     the no-op cheaply.
     """
     def _row_width(cells):
-        return sum(max(1, cs) for (_t, cs, _rs) in cells)
+        return sum(max(1, _cell_parts(c)[1]) for c in cells)
 
     def _boundaries(cells):
         b = {0}
         col = 0
-        for (_t, cs, _rs) in cells:
-            col += max(1, cs)
+        for c in cells:
+            col += max(1, _cell_parts(c)[1])
             b.add(col)
         return b
 
@@ -372,17 +539,19 @@ def _normalize_column_granularity(
                     break
 
             if not straddle:
-                content = [
-                    (t, rs) for (t, _cs, rs) in cells if (t or "").strip()
-                ]
+                content = []
+                for c in cells:
+                    t, _cs, rs, imgs = _cell_parts(c)
+                    if (t or "").strip():
+                        content.append((t, rs, imgs))
                 # Re-span content cells across the free segments, one per
                 # segment. Only when the counts line up exactly — otherwise we
                 # can't unambiguously map cells to segments, so leave as-is.
                 if content and len(content) == len(free_segs):
                     rebuilt = []
-                    for (t, rs), si in zip(content, free_segs):
+                    for (t, rs, imgs), si in zip(content, free_segs):
                         b0, b1 = bounds[si], bounds[si + 1]
-                        rebuilt.append((t, max(1, b1 - b0), rs))
+                        rebuilt.append((t, max(1, b1 - b0), rs, imgs))
                     if rebuilt != list(cells):
                         emit_cells = rebuilt
                         changed = True
@@ -392,7 +561,8 @@ def _normalize_column_granularity(
         # Place emit_cells into `occ` (skipping already-occupied columns) so
         # the rowspans this row starts are visible to subsequent rows.
         col = 0
-        for (_t, cs, rs) in emit_cells:
+        for c in emit_cells:
+            _t, cs, rs, _imgs = _cell_parts(c)
             while col < maxw and occ[row_idx][col]:
                 col += 1
             if col >= maxw:
@@ -408,16 +578,19 @@ def _normalize_column_granularity(
 
 
 def parse_table_grid(
-    rows: List[Tuple[List[Tuple[str, int, int]], bool]],
+    rows: List[Tuple[List[Tuple[str, int, int, int]], bool]],
 ) -> Tuple[
     int,
     int,
     Dict[Tuple[int, int], Tuple[str, int, int, bool]],
     List[List[bool]],
+    Dict[Tuple[int, int], int],
 ]:
     """Walk parsed (cells, is_header) rows into a sparse grid.
 
-    Returns (max_cols, n_rows, cell_anchors, occupied).
+    Returns (max_cols, n_rows, cell_anchors, occupied, img_by_anchor), where
+    `img_by_anchor` maps a cell anchor `(row, col)` to the number of `<img>`
+    placeholders that cell contained (0-valued anchors are omitted).
 
     The grid width is the MODAL row width, not the maximum. OCR frequently
     mis-segments a single row (an extra spurious split, a stray colspan) so
@@ -438,7 +611,7 @@ def parse_table_grid(
     n_rows = len(rows)
 
     def _row_width(row_cells):
-        return sum(max(1, cs) for (_t, cs, _rs) in row_cells)
+        return sum(max(1, _cell_parts(c)[1]) for c in row_cells)
 
     widths = [_row_width(r[0]) for r in rows]
     raw_max = min(max(widths, default=1) or 1, MAX_TABLE_COLS)
@@ -446,11 +619,13 @@ def parse_table_grid(
     def _place(target_cols: int):
         """Place cells into a target-width grid; report last non-empty col."""
         anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]] = {}
+        img_map: Dict[Tuple[int, int], int] = {}
         occ = [[False] * target_cols for _ in range(n_rows)]
         last_nonempty = 0
         for row_idx, (cells, is_header) in enumerate(rows):
             col = 0
-            for (cell_text, cs, rs) in cells:
+            for c in cells:
+                cell_text, cs, rs, imgs = _cell_parts(c)
                 while col < target_cols and occ[row_idx][col]:
                     col += 1
                 if col >= target_cols:
@@ -458,23 +633,25 @@ def parse_table_grid(
                 cs = min(max(1, cs), target_cols - col)
                 rs = min(max(1, rs), n_rows - row_idx)
                 anchors[(row_idx, col)] = (cell_text, cs, rs, is_header)
+                if imgs > 0:
+                    img_map[(row_idx, col)] = imgs
                 for rr in range(row_idx, row_idx + rs):
                     for cc in range(col, col + cs):
                         occ[rr][cc] = True
                 if (cell_text or "").strip():
                     last_nonempty = max(last_nonempty, col + cs)
                 col += cs
-        return anchors, occ, last_nonempty
+        return anchors, occ, last_nonempty, img_map
 
     # First pass at the widest observed width to learn where real content ends.
-    _a0, _o0, content_extent = _place(raw_max)
+    _a0, _o0, content_extent, _i0 = _place(raw_max)
     # Modal width, but never below the real-content extent, never above the cap.
     modal = Counter(widths).most_common(1)[0][0] if widths else 1
     max_cols = max(1, min(raw_max, max(modal, content_extent)))
 
-    cell_anchors, occupied, _ = _place(max_cols)
+    cell_anchors, occupied, _, img_by_anchor = _place(max_cols)
     _merge_duplicate_rowspan_labels(cell_anchors, occupied, max_cols, n_rows)
-    return max_cols, n_rows, cell_anchors, occupied
+    return max_cols, n_rows, cell_anchors, occupied, img_by_anchor
 
 
 def _merge_duplicate_rowspan_labels(
@@ -519,6 +696,92 @@ def _merge_duplicate_rowspan_labels(
             occupied[r + 1][0] = True
 
 
+def _pic_sort_key(pic: Dict) -> Tuple[float, float]:
+    """Reading-order key for a recovered picture: top-to-bottom then
+    left-to-right by bbox centroid."""
+    pb = pic.get("bbox") or []
+    if len(pb) != 4:
+        return (0.0, 0.0)
+    return ((pb[1] + pb[3]) / 2.0, (pb[0] + pb[2]) / 2.0)
+
+
+def _assign_pictures_by_img_structure(
+    pictures: List[Dict],
+    bbox: List[int],
+    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
+    img_by_anchor: Dict[Tuple[int, int], int],
+    n_rows: int,
+) -> Optional[Dict[Tuple[int, int], List[Dict]]]:
+    """Assign recovered pictures to the `<img>` cells parsed from the table HTML,
+    driven by each picture's LAYOUT BBOX Y-POSITION (not by a count match).
+
+    `img_by_anchor` maps a cell anchor to how many `<img>` placeholders that cell
+    held, which authoritatively marks WHICH cells hold pictures. Each image cell
+    owns a vertical band = the fraction of the table height its row-span covers
+    (a rowspan-3 image cell is a 3-row-tall band, correctly taller than a 1-row
+    cell). Every recovered picture is dropped into the image cell whose band
+    contains its bbox y-centroid (nearest band centre on a miss/tie).
+
+    This is robust to a picture/placeholder COUNT MISMATCH — the old code fell
+    back to equal-height-band geometry the moment `len(pics) != total_slots`,
+    which mis-placed the ROW (it only voted on the column). Placing by bbox keeps
+    each picture in the cell its position indicates: e.g. one picture in the row-3
+    image cell and two in the row-4 image cell when that is where their bboxes sit.
+
+    The `<img>` count per cell is honoured as a soft CAPACITY: while a cell is
+    already at capacity and another image cell is still empty, a picture prefers
+    the empty cell if it is at least as close in y — this prevents several
+    pictures piling into one cell when siblings are meant for the next row.
+
+    Returns None only when there is no usable `<img>` structure at all (no tags,
+    or all anchors merged away), so the caller falls back to the geometric scorer.
+    """
+    if not img_by_anchor or n_rows <= 0:
+        return None
+    tbl_y1 = float(bbox[1])
+    tbl_h = max(1.0, float(bbox[3]) - float(bbox[1]))
+
+    # Build image cells: (anchor, capacity, y-band lo/hi/centre) using row-span
+    # proportions over the table height (equal-row bands as the floor — real row
+    # heights aren't known here, but each cell still spans its true rowspan).
+    cells: List[Dict] = []
+    for rc, n in img_by_anchor.items():
+        if n <= 0 or rc not in cell_anchors:
+            continue
+        _t, _cs, rs, _h = cell_anchors[rc]
+        r0 = rc[0]
+        r1 = min(n_rows, r0 + max(1, rs))
+        lo = tbl_y1 + tbl_h * (r0 / n_rows)
+        hi = tbl_y1 + tbl_h * (r1 / n_rows)
+        cells.append({
+            "anchor": rc, "cap": n,
+            "lo": lo, "hi": hi, "mid": (lo + hi) / 2.0,
+            "count": 0,
+        })
+    if not cells:
+        return None
+
+    def _pic_cy(pic: Dict) -> float:
+        pb = pic.get("bbox") or []
+        if len(pb) != 4:
+            return tbl_y1
+        return (float(pb[1]) + float(pb[3])) / 2.0
+
+    out: Dict[Tuple[int, int], List[Dict]] = {}
+    for pic in sorted(pictures, key=_pic_sort_key):
+        cy = _pic_cy(pic)
+        # Prefer a cell whose band contains cy AND still has capacity; among
+        # those pick the nearest band centre. Fall back to: any capacity cell by
+        # y-distance; then (all full) the nearest band overall.
+        containing = [c for c in cells if c["lo"] <= cy <= c["hi"]]
+        with_cap = [c for c in containing if c["count"] < c["cap"]]
+        pool = with_cap or [c for c in cells if c["count"] < c["cap"]] or cells
+        best = min(pool, key=lambda c: abs(cy - c["mid"]))
+        best["count"] += 1
+        out.setdefault(best["anchor"], []).append(pic)
+    return out
+
+
 def _assign_pictures_to_cells(
     pictures: List[Dict],
     bbox: List[int],
@@ -526,8 +789,14 @@ def _assign_pictures_to_cells(
     cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
     max_cols: int,
     n_rows: int,
+    img_by_anchor: Optional[Dict[Tuple[int, int], int]] = None,
 ) -> Dict[Tuple[int, int], List[Dict]]:
     """Decide which (row, col) anchor each picture lives in.
+
+    When the table HTML carried `<img>` placeholders (``img_by_anchor``), that
+    structure is authoritative and used first (see
+    `_assign_pictures_by_img_structure`). Only when there is no usable `<img>`
+    structure do we fall back to the geometric scorer below.
 
     Why not just bbox-centroid → column edges? Two failure modes that hit
     real PDFs:
@@ -555,6 +824,14 @@ def _assign_pictures_to_cells(
     out: Dict[Tuple[int, int], List[Dict]] = {}
     if not pictures or n_rows <= 0 or max_cols <= 0:
         return out
+
+    # Authoritative <img>-structure assignment first (by picture bbox y-position);
+    # geometry is the fallback only when there are no <img> cells at all.
+    structural = _assign_pictures_by_img_structure(
+        pictures, bbox, cell_anchors, img_by_anchor or {}, n_rows,
+    )
+    if structural is not None:
+        return structural
 
     tbl_x1, tbl_y1, tbl_x2, tbl_y2 = bbox
     tbl_w_px = max(1.0, tbl_x2 - tbl_x1)
@@ -741,28 +1018,103 @@ def _balance_col_widths(
             continue
         col_cells[c].append((txt, max(1, cs), bool(is_header or r == 0)))
 
-    def _col_pressure(widths: List[int], c: int) -> int:
-        """Max wrapped-line count over column c's cells at the given widths.
-        Only counts cells the column ANCHORS (colspan cells contribute to their
-        anchor column so a wide merged header doesn't inflate a data column)."""
-        best = 1
+    def _col_pressure(widths: List[int], c: int) -> float:
+        """Pressure of column c at the given widths: wrapped-line count plus a
+        WORD-OVERFLOW penalty. Only counts cells the column ANCHORS (colspan
+        cells contribute to their anchor column so a wide merged header doesn't
+        inflate a data column).
+
+        `wrap_to_width` never breaks a single over-long word — it places it on
+        one line even when it exceeds the cell, so a column whose longest word
+        overflows still reports line-count = 1 and the balancer leaves it too
+        narrow (Word then breaks that word char-by-char, e.g. 'Aprovad'/'o').
+        The penalty (0, 1] adds how far the longest word overruns the usable
+        width, so an overflowing 1-line column outranks a clean 1-line column
+        and the loop steals width for it from an over-wide sibling. Capped at 1
+        so it can never outrank a genuinely multi-line crushed column."""
+        best = 1.0
         for (txt, cs, bold) in col_cells.get(c, []):
             cell_w_emu = sum(widths[c:c + cs])
             cell_w_pt = cell_w_emu / EMU_PER_PT
+            usable_pt = _usable_w_pt(cell_w_pt)
             font = meas_font_bold if bold else meas_font
-            n = len(wrap_to_width(
-                txt, font, max(1.0, cell_w_pt * 0.95), cell_size_px,
-            ))
-            if n > best:
-                best = n
+            n = len(wrap_to_width(txt, font, usable_pt, cell_size_px))
+            lw_px = _longest_word_px(txt, font, cell_size_px)
+            penalty = (
+                min(lw_px / usable_pt - 1.0, 1.0)
+                if (usable_pt > 0 and lw_px > usable_pt) else 0.0
+            )
+            best = max(best, float(n) + penalty)
         return best
 
-    def _pressures(widths: List[int]) -> List[int]:
+    def _pressures(widths: List[int]) -> List[float]:
         return [_col_pressure(widths, c) for c in range(max_cols)]
 
     widths = list(col_w_emus)
-    pressures = _pressures(widths)
     min_step = max(1, int(round(w * 0.005)))   # 0.5% of table width, granularity
+
+    def _col_word_overflow_emu(widths: List[int], c: int) -> int:
+        """EMU by which column c's widest unbreakable word overruns its usable
+        width (0 = no word overflow). A word wider than the cell is what makes
+        Word break it mid-word ('Aprovad'/'o'); this measures that deficit in
+        the SAME EMU space as the column widths so we can close it exactly."""
+        worst = 0.0
+        for (txt, cs, bold) in col_cells.get(c, []):
+            cell_w_emu = sum(widths[c:c + cs])
+            usable_pt = _usable_w_pt(cell_w_emu / EMU_PER_PT)
+            font = meas_font_bold if bold else meas_font
+            lw_px = _longest_word_px(txt, font, cell_size_px)
+            if lw_px > usable_pt:
+                # px is measured at this size == pt budget elsewhere; convert the
+                # (word − usable) pt deficit back to EMU for the transfer.
+                worst = max(worst, (lw_px - usable_pt) * EMU_PER_PT)
+        return int(round(worst))
+
+    # ── Word-overflow pre-pass ────────────────────────────────────────────────
+    # HARD failure (a mid-word char break by Word) takes priority over the SOFT
+    # line-count wrapping the main loop balances: a paragraph gaining a line is
+    # fine, a word splitting across lines is not. So first, while any column has
+    # a word wider than its cell, pull width into it from the column with the
+    # most slack above its floor — even a multi-line paragraph column (exactly
+    # the "steal from the widest column" the user asked for) — provided the
+    # donor doesn't itself start overflowing a word. Runs to a no-op when no
+    # column word-overflows (untouched for tables that already fit).
+    for _ in range(128):
+        overflow = [_col_word_overflow_emu(widths, c) for c in range(max_cols)]
+        need = max(overflow)
+        if need <= 0:
+            break
+        receiver = max(range(max_cols), key=lambda c: (overflow[c], -c))
+        donors = [
+            c for c in range(max_cols)
+            if c != receiver
+            and widths[c] - min_col_emus[c] >= min_step
+            and _col_word_overflow_emu(widths, c) == 0
+        ]
+        if not donors:
+            break
+        donor = max(donors, key=lambda c: widths[c] - min_col_emus[c])
+        donor_slack = widths[donor] - min_col_emus[donor]
+        # Move just enough to close the receiver's deficit, bounded by the
+        # donor's slack and never so much the donor starts breaking a word.
+        move = min(donor_slack, max(min_step, overflow[receiver]))
+        trial = list(widths)
+        trial[donor] -= move
+        trial[receiver] += move
+        if _col_word_overflow_emu(trial, donor) > 0:
+            # Donor would overflow — shrink the move to its own slack-to-overflow.
+            move = min_step
+            trial = list(widths)
+            trial[donor] -= move
+            trial[receiver] += move
+            if _col_word_overflow_emu(trial, donor) > 0:
+                break  # even one step breaks the donor — stop
+        # Keep only if the receiver's overflow strictly decreased.
+        if _col_word_overflow_emu(trial, receiver) >= overflow[receiver]:
+            break
+        widths = trial
+
+    pressures = _pressures(widths)
 
     for _ in range(64):
         cur_max = max(pressures)
@@ -794,6 +1146,11 @@ def _balance_col_widths(
             trial = list(widths)
             trial[donor] -= move
             trial[receiver] += move
+            # Never shrink a donor so far its own longest word overflows — that
+            # would trade the receiver's soft line-wrap for a hard mid-word break
+            # in the donor and undo the word-overflow pre-pass above.
+            if _col_word_overflow_emu(trial, donor) > 0:
+                break
             trial_p = _pressures(trial)
             # Reject if the donor became as crushed as the receiver was — that
             # just relocates the problem.
@@ -819,6 +1176,323 @@ def _balance_col_widths(
         widest = max(range(max_cols), key=lambda i: widths[i])
         widths[widest] = max(1, widths[widest] - drift)
     return widths
+
+
+# ── No-clip fitting: redistribute width+height, then shrink font ──────────────
+
+# Absolute minimum font (pt) the uniform-shrink fallback may reach. Smaller than
+# the normal 6pt readable floor: a tiny-but-fully-visible cell beats a clipped
+# one when the text genuinely can't fit the original table size. 3.5pt gives
+# dense many-row tables the extra headroom to fit every cell inside the source
+# bbox (rows stay hRule="exact") before the grow-backstop is ever needed.
+_HARD_MIN_FONT_PT = 3.5
+
+
+def _line_h_pt(size_px: int, bold: bool, cjk: bool) -> float:
+    """Height (pt) of one wrapped line at `size_px`, matching the measurement
+    used everywhere else (getmetrics + the CJK floor + 6% leading)."""
+    font = get_font(max(1, size_px), bold=bold)
+    if font is None:
+        return size_px * 1.2
+    asc, desc = font.getmetrics()
+    nat = asc + desc
+    if cjk:
+        nat = max(nat, size_px * 1.2)
+    return nat * 1.06
+
+
+def _needed_lines(text: str, cell_w_pt: float, size_px: int, bold: bool) -> int:
+    """Wrapped-line count for `text` in a cell `cell_w_pt` wide at `size_px`."""
+    if not (text or "").strip():
+        return 1
+    font = get_font(max(1, size_px), bold=bold)
+    if font is None:
+        return 1
+    return max(1, len(wrap_to_width(
+        text, font, _usable_w_pt(cell_w_pt), size_px,
+    )))
+
+
+def _cell_overflows(
+    text: str, cell_w_pt: float, cell_h_pt: float,
+    size_px: int, bold: bool, reserve_pt: float = 0.0,
+) -> bool:
+    """True when `text` needs more vertical room than the cell provides.
+
+    reserve_pt is height taken by a picture in the same cell (fit text above it).
+    """
+    if not (text or "").strip():
+        return False
+    avail_h = max(0.0, cell_h_pt - reserve_pt)
+    n = _needed_lines(text, cell_w_pt, size_px, bold)
+    return n * _line_h_pt(size_px, bold, has_cjk(text)) > avail_h + 0.5
+
+
+def _any_cell_overflows(
+    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
+    col_w_emus: List[int],
+    row_h_pts: List[float],
+    max_cols: int,
+    n_rows: int,
+    size_px: int,
+    reserve_pt_by_cell: Dict[Tuple[int, int], float],
+) -> bool:
+    for (r, c), (txt, cs, rs, is_h) in cell_anchors.items():
+        if c >= max_cols:
+            continue
+        cell_w_pt = sum(col_w_emus[c:c + max(1, cs)]) / EMU_PER_PT
+        cell_h_pt = sum(
+            row_h_pts[r:r + max(1, rs)]
+        ) if r < len(row_h_pts) else row_h_pts[-1]
+        bold = bool(is_h or r == 0)
+        if _cell_overflows(
+            txt, cell_w_pt, cell_h_pt, size_px, bold,
+            reserve_pt_by_cell.get((r, c), 0.0),
+        ):
+            return True
+    return False
+
+
+def _balance_row_heights(
+    row_h_pts: List[float],
+    row_min_pts: List[float],
+    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
+    col_w_emus: List[int],
+    max_cols: int,
+    n_rows: int,
+    size_px: int,
+    reserve_pt_by_cell: Dict[Tuple[int, int], float],
+) -> List[float]:
+    """Move height from rows with vertical slack to overflowing rows, holding
+    ``sum(row_h_pts)`` constant and never dropping a row below ``row_min_pts``.
+
+    Mirror of `_balance_col_widths` for the vertical axis: the row "pressure" is
+    the worst (needed − available) line deficit among its anchored cells; height
+    flows from the row with the most slack (available ≫ needed) to the row with
+    the largest deficit. Strict-improvement, converges to a no-op when balanced.
+    """
+    if n_rows < 2:
+        return row_h_pts
+
+    def _row_deficit(heights: List[float], r: int) -> float:
+        """Max (needed_h − avail_h) in pt over row r's anchored cells (>0 = clip)."""
+        worst = 0.0
+        for c in range(max_cols):
+            anc = cell_anchors.get((r, c))
+            if anc is None:
+                continue
+            txt, cs, rs, is_h = anc
+            if rs != 1 or not (txt or "").strip():
+                # Only single-row cells pin a single row's height; multi-row
+                # cells are handled by their spanned rows collectively.
+                continue
+            cell_w_pt = sum(col_w_emus[c:c + max(1, cs)]) / EMU_PER_PT
+            bold = bool(is_h or r == 0)
+            n = _needed_lines(txt, cell_w_pt, size_px, bold)
+            need_h = n * _line_h_pt(size_px, bold, has_cjk(txt))
+            need_h += reserve_pt_by_cell.get((r, c), 0.0)
+            worst = max(worst, need_h - heights[r])
+        return worst
+
+    heights = list(row_h_pts)
+    min_step = max(0.5, sum(heights) * 0.005)
+    for _ in range(64):
+        deficits = [_row_deficit(heights, r) for r in range(n_rows)]
+        cur_max = max(deficits)
+        if cur_max <= 0.5:
+            break
+        receiver = max(range(n_rows), key=lambda r: (deficits[r], -r))
+        donors = [
+            r for r in range(n_rows)
+            if r != receiver
+            and heights[r] - row_min_pts[r] >= min_step
+            and deficits[r] < cur_max
+        ]
+        if not donors:
+            break
+        donor = max(donors, key=lambda r: heights[r] - row_min_pts[r])
+        donor_slack = heights[donor] - row_min_pts[donor]
+        move = min(donor_slack, max(min_step, cur_max))
+        trial = list(heights)
+        trial[donor] -= move
+        trial[receiver] += move
+        new_def = [_row_deficit(trial, r) for r in range(n_rows)]
+        if new_def[donor] >= cur_max:
+            # Would just relocate the problem — try a smaller move.
+            move = min_step
+            trial = list(heights)
+            trial[donor] -= move
+            trial[receiver] += move
+            new_def = [_row_deficit(trial, r) for r in range(n_rows)]
+            if new_def[donor] >= cur_max or max(new_def) >= cur_max:
+                break
+        if max(new_def) < cur_max or (
+            max(new_def) == cur_max
+            and new_def.count(cur_max) < deficits.count(cur_max)
+        ):
+            heights = trial
+        else:
+            break
+
+    # Preserve exact-sum invariant: any residual goes to the tallest row.
+    drift = sum(heights) - sum(row_h_pts)
+    if abs(drift) > 1e-6:
+        tallest = max(range(n_rows), key=lambda i: heights[i])
+        heights[tallest] = max(row_min_pts[tallest], heights[tallest] - drift)
+    return heights
+
+
+def _measure_text_block(
+    text: str, box_w_pt: float, size_pt: float,
+) -> Tuple[List[str], float]:
+    """Wrap `text` to `box_w_pt` at `size_pt` and return (wrapped_lines,
+    needed_height_pt). Newlines in `text` are honoured as hard breaks."""
+    size_px = max(1, int(round(size_pt)))
+    font = get_font(size_px)
+    if font is None:
+        lines = text.split("\n")
+        return lines, len(lines) * size_pt * 1.3
+    usable_pt = max(1.0, box_w_pt - 2.0 * _CELL_MARGIN_PT)
+    wrapped: List[str] = []
+    for para in text.split("\n"):
+        if not para:
+            wrapped.append("")
+            continue
+        wrapped.extend(wrap_to_width(para, font, usable_pt, size_px))
+    asc, desc = font.getmetrics()
+    nat = asc + desc
+    if has_cjk(text):
+        nat = max(nat, size_px * 1.2)
+    line_h_pt = nat * 1.15
+    return wrapped, max(1, len(wrapped)) * line_h_pt
+
+
+def _emit_trailing_text_block(
+    ctx, text: str, x: int, y: int, w: int, h: int, style: Dict,
+) -> None:
+    """Render a flattened non-table text block (checkboxes, review paragraphs,
+    signatures, …) as a positioned text box at (x, y, w, h). Shrinks the font
+    only as far as needed to fit the reserved height; never clips."""
+    if not text.strip():
+        return
+    box_w_pt = max(1.0, w / EMU_PER_PT)
+    box_h_pt = max(1.0, h / EMU_PER_PT)
+    base_size_pt = float(style.get("size") or 11.0)
+    size_pt = base_size_pt
+    lines, need_pt = _measure_text_block(text, box_w_pt, size_pt)
+    while need_pt > box_h_pt + 0.5 and size_pt > 5.0:
+        size_pt = max(5.0, size_pt - 0.5)
+        lines, need_pt = _measure_text_block(text, box_w_pt, size_pt)
+    t_style = dict(style)
+    t_style["size"] = size_pt
+    line_pt = None
+    if len(lines) >= 2:
+        line_pt = min(box_h_pt / len(lines), size_pt * 1.5)
+    # Keep the block on the page: if it would extend past the page bottom, lift
+    # it up by the overflow (never above the page top).
+    page_h_emu = int(round(ctx.page_h_pt * EMU_PER_PT))
+    overflow = (y + h) - page_h_emu
+    if overflow > 0:
+        y = max(0, y - overflow)
+    runs_xml = build_run_xml("\n".join(lines), t_style)
+    para_xml = build_paragraph_xml(runs_xml, line_pt=line_pt)
+    ctx.xml_chunks.append(
+        build_anchored_textbox_xml(
+            x, y, w, h, para_xml, ctx._next_id(), body_auto_fit=False,
+        )
+    )
+
+
+def _pic_intrinsic_h(pic: Dict) -> float:
+    """A recovered picture's source height (bbox height in pixels; falls back to
+    the raster's own pixel height). Used only to split a shared rowspan between
+    stacked pictures in proportion to their sizes — units cancel, so the raw
+    pixel height is fine."""
+    pb = pic.get("bbox") or []
+    if len(pb) == 4 and pb[3] > pb[1]:
+        return float(pb[3] - pb[1])
+    img = pic.get("image_obj")
+    if img is not None:
+        try:
+            return float(img.size[1])
+        except Exception:
+            pass
+    return 1.0
+
+
+def _split_multi_picture_image_cells(
+    pic_assignments: Dict[Tuple[int, int], List[Dict]],
+    cell_anchors: Dict[Tuple[int, int], Tuple[str, int, int, bool]],
+    occupied: List[List[bool]],
+    n_rows: int,
+) -> None:
+    """Split any image cell that was assigned MORE THAN ONE picture into one
+    stacked sub-cell PER picture, so each diagram becomes its own row instead of
+    several diagrams crammed into a single merged cell.
+
+    Chandra sometimes emits a single ``<td rowspan=N><img></td>`` for a product
+    group that actually holds several stacked diagrams (it under-counts the
+    ``<img>`` tags and merges the rows). ``_assign_pictures_by_img_structure``
+    still recovers every picture by y-position, so that one rowspan image cell
+    ends up owning >1 picture; the emission loop then stacks them inside ONE
+    vMerge cell (dividing its height by the picture count). We fix the STRUCTURE
+    here instead: the anchor's ``rs`` rows are partitioned into ``n`` contiguous
+    sub-spans — sized in proportion to each picture's own height so a taller
+    diagram gets more rows — and each sub-cell is given exactly one picture. The
+    existing reserve loop then grows each sub-span to fit its picture, and the
+    emission loop renders each as its own ``vMerge`` cell (no height division).
+
+    Mutates ``pic_assignments`` and ``cell_anchors`` in place. ``occupied`` is
+    unchanged (the sub-spans partition exactly the rectangle the original anchor
+    already occupied). A strict no-op for the normal one-picture-per-cell case,
+    so well-formed picture tables render byte-identically.
+    """
+    for (a_r, a_c), pics in list(pic_assignments.items()):
+        if len(pics) <= 1:
+            continue
+        anchor = cell_anchors.get((a_r, a_c))
+        if anchor is None:
+            continue
+        text, cs, rs, is_header = anchor
+        pics = sorted(pics, key=_pic_sort_key)   # top-to-bottom
+        n = len(pics)
+
+        if rs < n:
+            # Not enough rows for one picture each: give the first rs-1 pictures a
+            # single row and pile the remainder into the last sub-cell (the
+            # reserve loop grows it and the emission scale clamp shrinks the
+            # stacked pictures so nothing clips). Rare in practice.
+            spans = [1] * (rs - 1) + [1]
+            groups: List[List[Dict]] = [[p] for p in pics[:rs - 1]]
+            groups.append(pics[rs - 1:])
+        else:
+            # Partition rs rows across n pictures ∝ picture height, min 1 each.
+            heights = [max(1.0, _pic_intrinsic_h(p)) for p in pics]
+            htot = sum(heights)
+            spans = [max(1, int(rs * hh / htot)) for hh in heights]
+            # Fix rounding so the sub-spans sum to exactly rs.
+            drift = rs - sum(spans)
+            i = 0
+            while drift != 0 and n > 0:
+                if drift > 0:
+                    spans[i % n] += 1
+                    drift -= 1
+                else:
+                    if spans[i % n] > 1:
+                        spans[i % n] -= 1
+                        drift += 1
+                i += 1
+            groups = [[p] for p in pics]
+
+        # Rewrite the anchor into contiguous sub-anchors, one group each.
+        del pic_assignments[(a_r, a_c)]
+        r = a_r
+        for idx, (span_i, grp) in enumerate(zip(spans, groups)):
+            cell_anchors[(r, a_c)] = (
+                text if idx == 0 else "", cs, span_i, is_header,
+            )
+            pic_assignments[(r, a_c)] = grp
+            r += span_i
 
 
 def render_table(
@@ -848,6 +1522,25 @@ def render_table(
 
     style = entry.get("style") or {}
 
+    # A "Table" entry often carries non-table HTML around the grid (form
+    # checkboxes, review paragraphs, signatures — emitted as <p>/<input>/<br>).
+    # Rendering only the grid drops all of it. Extract that surrounding content
+    # now; below we reserve vertical room for it and render it beneath the table
+    # so nothing is lost. Empty for a bare table → zero behavioural change.
+    trailing_text = extract_non_table_text(text) if rows else ""
+    trailing_h_emu = 0
+    trailing_style = dict(style)
+    if trailing_text:
+        box_w_pt = max(1.0, w / EMU_PER_PT)
+        _size = float(style.get("size") or 11.0)
+        _lines, _need_pt = _measure_text_block(trailing_text, box_w_pt, _size)
+        trailing_h_emu = int(round(_need_pt * EMU_PER_PT))
+        # Never let the trailing block claim more than 60% of the bbox — the
+        # table must keep enough room to render its own rows.
+        trailing_h_emu = min(trailing_h_emu, int(h * 0.6))
+        # Shrink the table's allotted height so the block fits below it.
+        h = max(1, h - trailing_h_emu)
+
     if not rows:
         # Fall back to text rendering inside a positioned box.
         x1, y1, x2, y2 = bbox
@@ -876,7 +1569,7 @@ def render_table(
         )
         return
 
-    max_cols, n_rows, cell_anchors, occupied = parse_table_grid(rows)
+    max_cols, n_rows, cell_anchors, occupied, img_by_anchor = parse_table_grid(rows)
 
     # Column widths: inferred from content, normalized to bbox width so the
     # total table width = source bbox width. When the entry carries
@@ -907,7 +1600,7 @@ def render_table(
     if pictures_for_table:
         pic_assignments = _assign_pictures_to_cells(
             pictures_for_table, bbox, col_weight, cell_anchors,
-            max_cols, n_rows,
+            max_cols, n_rows, img_by_anchor,
         )
         # A picture column's need is a MINIMUM WIDTH (the fitted image width),
         # not a proportional weight. Record the widest picture width per column
@@ -923,6 +1616,14 @@ def render_table(
                     continue
                 pic_w_pt = max(1.0, (pb[2] - pb[0]) / zoom)
                 pic_col_min_pt[c] = max(pic_col_min_pt[c], pic_w_pt)
+
+        # Split any image cell that owns >1 picture into one stacked sub-cell per
+        # picture, so multiple diagrams in a merged cell become separate rows
+        # (matching the source) instead of being crammed together. No-op when
+        # every image cell has a single picture.
+        _split_multi_picture_image_cells(
+            pic_assignments, cell_anchors, occupied, n_rows,
+        )
 
     # Allocate width with a floor per column: a column with a short label
     # like 'P3' still needs enough room for that label, otherwise narrow
@@ -1033,9 +1734,12 @@ def render_table(
         _bal_font, _bal_font_bold, _bal_size_px,
     )
 
-    grid_xml = "<w:tblGrid>" + ("".join(
-        f'<w:gridCol w:w="{cw}"/>' for cw in col_w_emus
-    )) + "</w:tblGrid>"
+    # NOTE: the <w:tblGrid> is built LATER (just before emission) from the FINAL
+    # `col_w_emus`, because the coupled redistribution + font-fallback loop below
+    # re-balances columns at the actually-rendered font size. Building it here
+    # would freeze the grid at `_bal_size_px`, which can differ from the final
+    # cell font — leaving a column word-overflowing at render time even though it
+    # fit at the balance size.
 
     borders_xml = (
         '<w:tblBorders>'
@@ -1047,11 +1751,25 @@ def render_table(
         '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
         '</w:tblBorders>'
     )
+    # Pin the cell margins to EXACTLY what the fitter models (`_usable_w_pt`
+    # subtracts `_CELL_MARGIN_PT` per side; top/bottom = 0). Emitting them
+    # explicitly stops Word from applying its own default (108 twips L/R) that
+    # the fitter would otherwise have to guess at.
+    _mar_tw = int(round(_CELL_MARGIN_PT * 20))   # 5.4 pt → 108 twips
+    cell_mar_xml = (
+        '<w:tblCellMar>'
+        '<w:top w:w="0" w:type="dxa"/>'
+        f'<w:left w:w="{_mar_tw}" w:type="dxa"/>'
+        '<w:bottom w:w="0" w:type="dxa"/>'
+        f'<w:right w:w="{_mar_tw}" w:type="dxa"/>'
+        '</w:tblCellMar>'
+    )
     tbl_pr_xml = (
         '<w:tblPr>'
         f'<w:tblW w:w="{w}" w:type="dxa"/>'
         '<w:tblLayout w:type="fixed"/>'
         f'{borders_xml}'
+        f'{cell_mar_xml}'
         '</w:tblPr>'
     )
 
@@ -1079,7 +1797,7 @@ def render_table(
         cell_w_emu = sum(col_w_emus[col_idx:col_idx + max(1, cs)])
         cell_w_pt = cell_w_emu / EMU_PER_PT
         wrapped = wrap_to_width(
-            cell, font, max(1.0, cell_w_pt * 0.95), cell_size_px,
+            cell, font, _usable_w_pt(cell_w_pt), cell_size_px,
         )
         return max(1, len(wrapped))
 
@@ -1097,12 +1815,10 @@ def render_table(
     row_h_pts = [
         (bbox_h_pt * rl / weight_sum) for rl in row_lines_arr
     ]
-    # Floor each row by ITS OWN line count, not a flat one-line minimum —
-    # otherwise a row that wraps to 2+ lines (long text, narrow column) can be
-    # squeezed by the proportional bbox split down to one line's height, and
-    # since rows are emitted with hRule="exact" (hard clip, no autofit), the
-    # extra line(s) render past the row border and get visually clipped by
-    # the next row's border line.
+    # Floor each row by ITS OWN line count as an initial guess. The coupled
+    # redistribution + font fallback below then reshapes these so no cell clips
+    # while the row total is pinned to the source bbox height (rows emit with
+    # hRule="exact", so their final heights must actually hold their content).
     line_h_pt = natural_h_px * 1.06
     row_h_pts = [
         max(rh, line_h_pt * rl) for rh, rl in zip(row_h_pts, row_lines_arr)
@@ -1160,27 +1876,31 @@ def render_table(
                     # re-fit below can't squeeze the image back out.
                     row_min_pts[r] = max(row_min_pts[r], row_h_pts[r])
 
-    # Keep the table inside its source bbox height. Growing rows for pictures
-    # (or wrapped text) can push the total past the bbox; because the table
-    # lives in a fixed-height anchored textbox (noAutofit), any overflow is
-    # hard-clipped — which drops the bottom rows and can also overlap whatever
-    # sits just below the table on the page. So if we're over budget, reclaim
-    # the excess from rows that have slack ABOVE their minimum, proportionally,
-    # leaving every row at least its minimum (text + any picture share). If the
-    # minimums themselves already exceed the bbox (a genuinely oversized table —
-    # e.g. the OCR bbox is far too short for the number of rows), DON'T crush the
-    # rows below a readable height: doing so makes every cell shrink-and-truncate
-    # to a bare "…", which loses all the content. Instead keep each row at its
-    # readable minimum and let the anchored textbox grow taller than the source
-    # bbox (auto-fit) so the whole table stays visible and legible. A slightly
-    # oversized-but-readable table beats a bbox-perfect grid of ellipses.
-    table_grew_past_bbox = False
-    total_pt = sum(row_h_pts)
-    if total_pt > bbox_h_pt + 0.5:
-        min_total = sum(row_min_pts)
-        if min_total <= bbox_h_pt:
-            excess = total_pt - bbox_h_pt
-            for _ in range(8):
+    # ── No-clip fitting: keep the table EXACTLY its source size, redistribute
+    # internal column widths + row heights (whole column / whole row, totals
+    # fixed) from slack cells to crushed cells, and only if that is exhausted
+    # shrink the font uniformly. The table box never grows past its bbox (that
+    # would overlap the content below) and no cell is ever clipped. ──────────────
+
+    # Normalise rows to sum EXACTLY to the bbox height. Picture rows keep their
+    # reserved minimum; the extra/deficit is spread over the other rows' slack.
+    reserve_pt_by_cell: Dict[Tuple[int, int], float] = {
+        k: v / EMU_PER_PT for k, v in _pic_reserve_emu_by_cell.items()
+    }
+
+    def _normalise_to(target_pt: float) -> None:
+        """Scale row_h_pts so they sum to target_pt, honouring row_min_pts as
+        hard floors and putting any residual on the tallest slack row."""
+        nonlocal row_h_pts
+        cur = sum(row_h_pts)
+        if cur <= 1e-6:
+            return
+        if abs(cur - target_pt) < 0.5:
+            return
+        if cur > target_pt:
+            # Over budget: reclaim from rows with slack above their minimum.
+            excess = cur - target_pt
+            for _ in range(12):
                 slack = [rh - mn for rh, mn in zip(row_h_pts, row_min_pts)]
                 slack_total = sum(s for s in slack if s > 0)
                 if slack_total <= 1e-6 or excess <= 0.5:
@@ -1189,16 +1909,141 @@ def render_table(
                 for rh, s in zip(row_h_pts, slack):
                     if s <= 0:
                         new_h.append(rh)
-                        continue
-                    take = min(s, excess * s / slack_total)
-                    new_h.append(rh - take)
-                excess = sum(new_h) - bbox_h_pt
+                    else:
+                        new_h.append(rh - min(s, excess * s / slack_total))
+                excess = sum(new_h) - target_pt
                 row_h_pts = new_h
         else:
-            # Even the minimums don't fit — keep every row at its readable
-            # minimum and let the box grow to hold them (see note above).
-            row_h_pts = list(row_min_pts)
-            table_grew_past_bbox = True
+            # Under budget: hand the spare height to every row proportionally so
+            # the table fills its bbox exactly (no gap under the last row).
+            add = target_pt - cur
+            base = sum(row_h_pts) or n_rows
+            row_h_pts = [rh + add * (rh / base) for rh in row_h_pts]
+
+    _normalise_to(bbox_h_pt)
+
+    # Coupled redistribution: alternate column-width and row-height balancing,
+    # re-measuring overflow, until nothing overflows or no improving move remains.
+    fit_size_px = cell_size_px
+    for _ in range(24):
+        if not _any_cell_overflows(
+            cell_anchors, col_w_emus, row_h_pts, max_cols, n_rows,
+            fit_size_px, reserve_pt_by_cell,
+        ):
+            break
+        # (a) whole-column: give width to the most line-pressured column.
+        _bf = get_font(fit_size_px)
+        _bfb = get_font(fit_size_px, bold=True) or _bf
+        new_cols = _balance_col_widths(
+            col_w_emus, min_col_emus, cell_anchors, max_cols, w,
+            _bf, _bfb, fit_size_px,
+        )
+        # (b) whole-row: give height to the most clipped row.
+        new_rows = _balance_row_heights(
+            row_h_pts, row_min_pts, cell_anchors, new_cols,
+            max_cols, n_rows, fit_size_px, reserve_pt_by_cell,
+        )
+        if new_cols == col_w_emus and all(
+            abs(a - b) < 1e-6 for a, b in zip(new_rows, row_h_pts)
+        ):
+            break  # converged — redistribution can't help further
+        col_w_emus = new_cols
+        row_h_pts = new_rows
+
+    # Font fallback: if redistribution alone can't fit every cell WITHIN THE
+    # FIXED bbox height, shrink the whole-table font in 0.5pt steps (down to a
+    # hard floor) until nothing overflows. Each step ALSO re-balances columns at
+    # the current font (so the grid we emit is verified at the size it renders —
+    # a word that fit at the balance size can overflow at a larger render size),
+    # recomputes the tighter per-row minimums, forces the rows back to sum
+    # EXACTLY to the bbox height (never grow), re-balances row heights, and
+    # re-measures. Uniform font keeps the table visually consistent;
+    # smaller-but-fully-visible always beats clipped.
+    def _min_rows_for(size_px: int) -> List[float]:
+        lh = _line_h_pt(size_px, False, False)
+        return [
+            max(lh * 1, reserve_pt_by_cell.get((r, 0), 0.0))
+            for r in range(n_rows)
+        ]
+
+    # When True, even the hard-min font can't fit the content in the source bbox
+    # height; the grow-backstop below lets the table extend downward so text is
+    # NEVER clipped (rows switch to hRule="atLeast"). Effectively unreachable for
+    # real tables at the 3.5pt floor — it exists only to honour "no clip".
+    _grow_to_fit = False
+    while True:
+        _spx = max(1, int(round(fit_size_px)))
+        # Re-balance columns AT THE CURRENT FONT so the emitted grid is the one
+        # this iteration verifies (fixes the ordering bug where a post-loop
+        # re-balance could invalidate the fit).
+        _ff = get_font(_spx)
+        _ffb = get_font(_spx, bold=True) or _ff
+        col_w_emus = _balance_col_widths(
+            col_w_emus, min_col_emus, cell_anchors, max_cols, w,
+            _ff, _ffb, _spx,
+        )
+        row_min_pts = _min_rows_for(_spx)
+        _normalise_to(bbox_h_pt)   # rows sum to bbox height (never grow)
+        row_h_pts = _balance_row_heights(
+            row_h_pts, row_min_pts, cell_anchors, col_w_emus,
+            max_cols, n_rows, _spx, reserve_pt_by_cell,
+        )
+        if not _any_cell_overflows(
+            cell_anchors, col_w_emus, row_h_pts, max_cols, n_rows,
+            _spx, reserve_pt_by_cell,
+        ):
+            break
+        if fit_size_px <= _HARD_MIN_FONT_PT + 1e-6:
+            # Even the hard-min font can't fit in the fixed bbox. Rather than
+            # clip, signal the grow-backstop so the table extends downward.
+            _grow_to_fit = True
+            break
+        fit_size_px = max(_HARD_MIN_FONT_PT, fit_size_px - 0.5)
+
+    # Lock the per-cell emission font to the fitted size and keep totals exact.
+    cell_size_pt = float(fit_size_px)
+    cell_size_px = max(1, int(round(fit_size_px)))
+    row_min_pts = _min_rows_for(cell_size_px)
+
+    if not _grow_to_fit:
+        _normalise_to(bbox_h_pt)
+    else:
+        # Grow-backstop: give every row at least the height its tallest cell
+        # needs at the floor font, so NO cell clips. Rows below emit with
+        # hRule="atLeast" and the outer box takes the grown height. Rowspan
+        # deficits are spread across the spanned rows (mirrors the picture
+        # reserve pass above).
+        for r in range(n_rows):
+            need_here = row_min_pts[r]
+            for c in range(max_cols):
+                anc = cell_anchors.get((r, c))
+                if anc is None:
+                    continue
+                txt, cs, rs, is_h = anc
+                if rs != 1 or not (txt or "").strip():
+                    continue
+                cw_pt = sum(col_w_emus[c:c + max(1, cs)]) / EMU_PER_PT
+                bold = bool(is_h or r == 0)
+                n = _needed_lines(txt, cw_pt, cell_size_px, bold)
+                nh = n * _line_h_pt(cell_size_px, bold, has_cjk(txt))
+                nh += reserve_pt_by_cell.get((r, c), 0.0)
+                need_here = max(need_here, nh)
+            row_h_pts[r] = max(row_h_pts[r], need_here)
+        # Rowspan cells: ensure their spanned rows collectively hold the content.
+        for (r, c), (txt, cs, rs, is_h) in cell_anchors.items():
+            if rs <= 1 or not (txt or "").strip():
+                continue
+            cw_pt = sum(col_w_emus[c:c + max(1, cs)]) / EMU_PER_PT
+            bold = bool(is_h or r == 0)
+            n = _needed_lines(txt, cw_pt, cell_size_px, bold)
+            need = n * _line_h_pt(cell_size_px, bold, has_cjk(txt))
+            need += reserve_pt_by_cell.get((r, c), 0.0)
+            span = list(range(r, min(n_rows, r + rs)))
+            have = sum(row_h_pts[rr] for rr in span)
+            if need > have and span:
+                add = (need - have) / len(span)
+                for rr in span:
+                    row_h_pts[rr] += add
 
     # Picture placement reuses the cell assignment already computed above
     # (the same one that fed into col_weight). Recomputing here from final
@@ -1230,58 +2075,31 @@ def render_table(
                         for dr in range(rs)
                     )
 
-                # Per-cell fit so text is FULLY VISIBLE. Each cell is re-fitted
-                # against its final (cell_w x cell_h). The base size is the
-                # table-wide cap `cell_size_pt` (from the narrowest column);
-                # `fit_multiline` shrinks further inside that budget and
-                # truncates with `…` when even the floor doesn't fit, so cell
-                # content never overflows the fixed row height (`hRule="exact"`).
-                # When the cell also holds pictures, fit the text into the space
-                # left ABOVE them so text and image don't collide.
+                # When this cell also holds pictures, the text is fit into the
+                # space left ABOVE them (subtract the reserved picture height)
+                # so the label and the image don't collide / clip each other.
                 cell_w_pt_for_fit = cell_w_emu / EMU_PER_PT
-                cell_h_pt_for_fit = cell_h_emu / EMU_PER_PT
-                if any(p.get("image_obj") for p in pics_here):
-                    reserve_pt = (
-                        _pic_reserve_emu_by_cell.get((row_idx, col_idx), 0)
-                        / EMU_PER_PT
-                    )
-                    one_line_pt = natural_h_px * 1.06
-                    cell_h_pt_for_fit = max(
-                        one_line_pt, cell_h_pt_for_fit - reserve_pt,
-                    )
-                fitted_cell_pt, fitted_cell_lines = fit_multiline(
-                    cell_text,
-                    max(1.0, cell_w_pt_for_fit),
-                    max(1.0, cell_h_pt_for_fit),
-                    max_size_pt=cell_size_pt,
-                )
+                # The coupled redistribution + font fallback above already sized
+                # the columns, rows and `cell_size_px` so that EVERY cell's full
+                # text fits its cell at that size — so we render at exactly the
+                # fitted size and wrap the FULL text (never an ellipsis, never a
+                # smaller-than-fitted 6pt path that would clip). This is what
+                # guarantees no clipped / hidden / scrollable cells.
                 cell_style = dict(style)
-                if fitted_cell_lines is None and cell_text:
-                    # Cell text can't fit its column even at the floor size.
-                    # Render the FULL text wrapped at the floor (never an
-                    # ellipsis) — the row already grows to a readable minimum,
-                    # so the extra lines stay visible rather than being lost.
-                    cell_style["size"] = min(cell_size_pt, 6.0)
-                    _f = get_font(
-                        max(1, int(round(6.0))),
-                        bold=bool(is_header or row_idx == 0),
+                cell_style["size"] = cell_size_pt
+                if cell_text:
+                    _wf = get_font(
+                        cell_size_px, bold=bool(is_header or row_idx == 0),
                     )
-                    if _f is not None:
-                        _wrapped = wrap_to_width(
-                            cell_text, _f, max(1.0, cell_w_pt_for_fit) * 0.93,
-                            int(round(6.0)),
-                        )
-                        rendered_cell_text = "\n".join(_wrapped)
+                    if _wf is not None:
+                        rendered_cell_text = "\n".join(wrap_to_width(
+                            cell_text, _wf,
+                            _usable_w_pt(cell_w_pt_for_fit), cell_size_px,
+                        ))
                     else:
                         rendered_cell_text = cell_text
                 else:
-                    cell_style["size"] = (
-                        fitted_cell_pt if cell_text else cell_size_pt
-                    )
-                    rendered_cell_text = (
-                        "\n".join(fitted_cell_lines)
-                        if fitted_cell_lines else cell_text
-                    )
+                    rendered_cell_text = cell_text
                 if is_header or row_idx == 0:
                     cell_style["bold"] = True
                 run_xml = build_run_xml(rendered_cell_text, cell_style)
@@ -1289,9 +2107,30 @@ def render_table(
                 # (engineering reports, risk matrices, parts lists). Center
                 # horizontally + vertically so cells read consistently and a
                 # short value in a wide column isn't pinned to the left edge.
-                para_xml = build_paragraph_xml(run_xml, alignment="center")
+                #
+                # Pin an EXACT per-line height equal to the value the fitter
+                # measured (`_line_h_pt`) so Word can't fall back to its ~1.15x
+                # default single spacing, which is taller than we reserved and
+                # would clip multi-line cells under `hRule="exact"`. This makes
+                # measurement == render for height.
+                _cell_bold = bool(is_header or row_idx == 0)
+                _line_pt = (
+                    _line_h_pt(
+                        cell_size_px, _cell_bold, has_cjk(rendered_cell_text),
+                    )
+                    if rendered_cell_text.strip() else None
+                )
+                para_xml = build_paragraph_xml(
+                    run_xml, alignment="center", line_pt=_line_pt,
+                )
+                # One text line's worth of reserved height above any picture(s)
+                # in the cell — use the SAME per-line height the paragraph is
+                # pinned to (above) so the reserve matches the render exactly.
                 text_reserve_emu = (
-                    int(round(natural_h_px * 1.06 * EMU_PER_PT))
+                    int(round(
+                        _line_h_pt(cell_size_px, _cell_bold, has_cjk(cell_text))
+                        * EMU_PER_PT
+                    ))
                     if cell_text else 0
                 )
                 pic_budget_h_emu = max(1, cell_h_emu - text_reserve_emu)
@@ -1413,28 +2252,44 @@ def render_table(
                     f"{empty_para}"
                     "</w:tc>"
                 )
-        # `exact` (not `atLeast`) so a single cell with oversized content
-        # can't blow past the row budget and push the table off the source
-        # bbox — that's what overlapped the text below the table on page 1.
-        # Pictures placed in cells are pre-scaled to fit (see scale_h above),
-        # so `exact` is safe.
+        # Normally `exact` so a single cell with oversized content can't blow
+        # past the row budget and push the table off the source bbox. In the
+        # grow-backstop case (content can't fit even at the floor font) rows use
+        # `atLeast` so Word keeps each row tall enough for its content instead of
+        # clipping it — the row heights above were grown to hold the text and the
+        # outer box takes the grown total, so nothing is lost.
+        # Pictures placed in cells are pre-scaled to fit (see scale_h above).
+        _hrule = "atLeast" if _grow_to_fit else "exact"
         row_h_twips = max(1, int(round(row_h_pts[row_idx] * 20)))
-        tr_pr = f'<w:trPr><w:trHeight w:val="{row_h_twips}" w:hRule="exact"/></w:trPr>'
+        tr_pr = f'<w:trPr><w:trHeight w:val="{row_h_twips}" w:hRule="{_hrule}"/></w:trPr>'
         rows_xml_parts.append("<w:tr>" + tr_pr + "".join(cells_xml) + "</w:tr>")
 
+    # Build the grid from the FINAL, fully-balanced column widths (see note at
+    # the pre-emission balance call above).
+    grid_xml = "<w:tblGrid>" + ("".join(
+        f'<w:gridCol w:w="{cw}"/>' for cw in col_w_emus
+    )) + "</w:tblGrid>"
     tbl_xml = f"<w:tbl>{tbl_pr_xml}{grid_xml}{''.join(rows_xml_parts)}</w:tbl>"
     body_xml = tbl_xml + '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>'
-    # Normally noAutofit: rows + cell content are sized to fit the source bbox,
-    # so nothing overflows and the box stays exactly on the source rectangle.
-    # BUT when the OCR bbox was too short for the row count, the rows were kept
-    # at their readable minimum (see `table_grew_past_bbox`) and now sum past
-    # `h`; in that case grow the box to the rows' real total and let it auto-fit
-    # so the extra rows render instead of being clipped to nothing.
-    if table_grew_past_bbox:
-        h = max(h, int(round(sum(row_h_pts) * EMU_PER_PT)))
+    # Pin the outer text-box height to the sum of the (redistributed) row heights,
+    # which the fitting loop kept EQUAL to the source bbox height. Always
+    # `noAutofit`: the table must never grow past its source rectangle (that would
+    # overlap the content below) and never shrink to clip the last rows. The
+    # coupled redistribution + uniform font fallback above guarantee every cell's
+    # full text already fits inside these fixed rows, so `hRule="exact"` clips
+    # nothing.
+    rows_total_emu = int(round(sum(row_h_pts) * EMU_PER_PT))
+    h = rows_total_emu
     ctx.xml_chunks.append(
         build_anchored_textbox_xml(
             x, y, w, h, body_xml, ctx._next_id(),
-            body_auto_fit=table_grew_past_bbox,
+            body_auto_fit=False,
         )
     )
+
+    # Render the non-table content (checkboxes, review paragraphs, signatures)
+    # in the vertical band reserved for it, directly beneath the table.
+    if trailing_text and trailing_h_emu > 0:
+        _emit_trailing_text_block(
+            ctx, trailing_text, x, y + h, w, trailing_h_emu, trailing_style,
+        )

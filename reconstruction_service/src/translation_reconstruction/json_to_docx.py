@@ -181,7 +181,7 @@ def _link_table_continuations(layout_results) -> None:
                 continue
             text = (entry.get("text") or "").strip()
             has_thead = "<thead" in text.lower()
-            max_cols, n_rows, cell_anchors, _occ = parse_table_grid(rows)
+            max_cols, n_rows, cell_anchors, _occ, _img = parse_table_grid(rows)
 
             bbox = entry.get("bbox") or [0, 0, 0, 0]
             tbl_top = bbox[1] if len(bbox) >= 2 else 0
@@ -288,6 +288,10 @@ def json_to_docx(layout_results, output_path="output.docx"):
             zoom=page_zoom,
             shape_id_start=shape_counter,
         )
+        # Expose the page's (reflowed) entries so per-entry renderers can be
+        # obstacle-aware — e.g. a header/caption width-grow must stop before a
+        # right-hand neighbour so their rendered TEXT never overlaps.
+        ctx.page_entries = entries
 
         tables = [e for e in entries if e.get("category") == "Table"]
 

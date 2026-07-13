@@ -341,6 +341,17 @@ def _html_block_to_text(html_fragment: str) -> str:
     separately in chandra_style by inspecting the same HTML."""
     frag = _inline_math_to_dollars(html_fragment)
     soup = BeautifulSoup(frag, "html.parser")
+    # Convert form checkboxes/radios to a Unicode box glyph BEFORE get_text(),
+    # which would otherwise strip the empty <input> tags and silently drop both
+    # the box and its checked/unchecked state. Chandra emits these on standalone
+    # Form/Text blocks (e.g. "是否合格： <input checked type=checkbox/>是 …") just
+    # as it does inside tables; without this they vanish from the JSON entirely.
+    for inp in soup.find_all("input"):
+        itype = (inp.get("type") or "checkbox").lower().rstrip("/").strip()
+        if itype in ("checkbox", "radio"):
+            inp.replace_with("☑" if inp.has_attr("checked") else "☐")
+        else:
+            inp.replace_with("")
     # Convert structural breaks to newlines before extracting text.
     for br in soup.find_all("br"):
         br.replace_with("\n")
@@ -515,12 +526,14 @@ def _open_rgb(image_path: str) -> Image.Image:
         return im.convert("RGB")
 
 
-async def process_image_async(image_path: str) -> list:
-    """Async layout extraction against Chandra. Returns a list of layout
-    entries with pixel bboxes. Retries with rising temperature when the model
-    degenerates into a repeat loop (Chandra's guard, replacing the ngram
-    logits processor Unlimited-OCR needed)."""
-    orig_img = _open_rgb(image_path)
+async def ocr_image_async(orig_img: Image.Image) -> list:
+    """Async layout extraction against Chandra for an in-memory RGB image.
+
+    Returns a list of layout entries with pixel bboxes (relative to `orig_img`).
+    Retries with rising temperature when the model degenerates into a repeat
+    loop (Chandra's guard, replacing the ngram logits processor Unlimited-OCR
+    needed). Shared by the full-page path (`process_image_async`) and the
+    targeted table re-OCR (`table_reocr`)."""
     model_img = scale_to_fit(orig_img)
     messages = _build_messages(model_img)
 
@@ -545,6 +558,12 @@ async def process_image_async(image_path: str) -> list:
         log.warning("[ocr] repeat-token loop detected, retrying (attempt %d)", attempt + 1)
 
     return parse_layout_html(raw, orig_img)
+
+
+async def process_image_async(image_path: str) -> list:
+    """Async layout extraction against Chandra for a file on disk. Thin wrapper
+    over `ocr_image_async` that opens + RGB-converts the image first."""
+    return await ocr_image_async(_open_rgb(image_path))
 
 
 def process_image(image_path: str, vllm_url: str | None = None) -> list:

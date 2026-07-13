@@ -64,7 +64,7 @@ def _image_columns(
     rows = parse_html_table_rows(table_html)
     if not rows:
         return 0, {}
-    max_cols, n_rows, _cell_anchors, _occ = parse_table_grid(rows)
+    max_cols, n_rows, _cell_anchors, _occ, _img = parse_table_grid(rows)
 
     # Re-walk the HTML rows placing cells into the same occupancy grid
     # parse_table_grid uses, so an <img> cell's (row, col) matches the anchors.
@@ -111,7 +111,7 @@ def _column_x_edges(
     """Pixel x-edges of every column, proportional to `compute_col_weights`
     (horizontally accurate against the source, unlike row heights)."""
     rows = parse_html_table_rows(table_html)
-    _mc, _nr, cell_anchors, _occ = parse_table_grid(rows)
+    _mc, _nr, cell_anchors, _occ, _img = parse_table_grid(rows)
     weights = compute_col_weights(cell_anchors, max_cols)
     wsum = sum(weights) or max_cols
     edges = [float(tbl_x1)]

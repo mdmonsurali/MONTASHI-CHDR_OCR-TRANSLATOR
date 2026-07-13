@@ -85,6 +85,17 @@ def render_text_entry(ctx, entry: Dict) -> None:
             # (spare height falls to the box bottom) so no line can clip.
             line_pt = min(exact, used_size * 1.5)
 
+    # Keep the (possibly grown) box on the page. A text box anchored at `y`
+    # grows DOWNWARD, so an entry near the page bottom — most commonly a
+    # Page-Footer the OCR gave a too-short bbox, but also any bottom-anchored
+    # text — would overflow the page edge and be visually clipped. When the box
+    # bottom would pass the page bottom, lift `y` up by the overflow (never above
+    # the page top) so every measured line stays inside the printable area.
+    page_h_emu = int(round(ctx.page_h_pt * EMU_PER_PT))
+    overflow = (y + h) - page_h_emu
+    if overflow > 0:
+        y = max(0, y - overflow)
+
     runs_xml = build_run_xml(render_text, style)
     para_xml = build_paragraph_xml(runs_xml, alignment=alignment, line_pt=line_pt)
     ctx.xml_chunks.append(
