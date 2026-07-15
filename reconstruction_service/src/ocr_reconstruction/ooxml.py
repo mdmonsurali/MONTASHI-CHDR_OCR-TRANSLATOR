@@ -22,6 +22,12 @@ _CJK_DEFAULT_FONTS = {
     "ko": os.environ.get("DOCX_FONT_KO", "Batang"),        # Korean
 }
 
+# Face used to render ballot/form symbols (☑/☐/○/✓…) that Latin text fonts lack.
+# Must be a font that (a) is installed in the render container and (b) directly
+# contains these glyphs. DejaVu Sans satisfies both (ships in the LibreOffice
+# image; covers U+2610-2612/25CB/2713…). Override per deployment if needed.
+_SYMBOL_FONT = os.environ.get("DOCX_FONT_SYMBOL", "DejaVu Sans")
+
 # Common Latin-only families that carry no CJK glyphs. When one of these is the
 # active font AND the text has CJK, we add a CJK eastAsia fallback. Matched
 # case-insensitively; extend via DOCX_LATIN_ONLY_FONTS (comma-separated).
@@ -46,9 +52,27 @@ _RE_ANY_CJK = re.compile(
     r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
 )
 
+# Ballot / geometric-symbol glyphs the reconstruction emits for form controls
+# (checkboxes U+2610-2612, radios U+25CB/25CF/25EF, ticks U+2713/2714/2717/2718).
+# These live in the Unicode "Miscellaneous Symbols"/"Dingbats" blocks \u2014 NOT in
+# Latin text faces like Calibri/Arial \u2014 so a run like "checkbox Normal checkbox
+# Abnormal" carries no CJK yet still has no glyph in its Latin font and the box
+# silently drops in Word / strict renderers. We route such runs' eastAsia slot
+# to a symbol-bearing CJK face (SimSun et al. all include these), the same
+# escape valve used for CJK.
+_RE_FORM_SYMBOL = re.compile(
+    r"[\u2610-\u2612\u25cb\u25cf\u25ef\u2713\u2714\u2717\u2718]"
+)
+
 
 def has_cjk(text: str) -> bool:
     return bool(text) and bool(_RE_ANY_CJK.search(text))
+
+
+def has_form_symbol(text: str) -> bool:
+    """True when `text` contains a ballot/radio/tick glyph absent from Latin
+    text fonts (see `_RE_FORM_SYMBOL`)."""
+    return bool(text) and bool(_RE_FORM_SYMBOL.search(text))
 
 
 def detect_cjk_script(text: str) -> Optional[str]:
@@ -74,14 +98,23 @@ def resolve_east_asia_font(font: str, text: str, explicit: Optional[str]) -> str
     - An explicit per-run eastAsia font always wins.
     - Otherwise the run's own (detected or fallback) `font` is used, so a font
       the detector chose is respected in both slots.
-    - Only when the text has CJK and `font` is a known Latin-only family do we
+    - When the text has CJK and `font` is a known Latin-only family we
       substitute a language-appropriate CJK default (the no-detection case).
+    - When the text has a ballot/form symbol (☑/☐/○/✓…) that a Latin-only
+      `font` cannot render — but no CJK to trigger the branch above — we route
+      the eastAsia slot to a symbol-bearing CJK face so the glyph shows. Without
+      this, Latin-script forms silently lose their checkboxes.
     """
     if explicit:
         return explicit
-    if has_cjk(text) and (font or "").strip().lower() in _LATIN_ONLY_FONTS:
-        script = detect_cjk_script(text)
-        return _CJK_DEFAULT_FONTS.get(script) or font
+    if (font or "").strip().lower() in _LATIN_ONLY_FONTS:
+        if has_cjk(text):
+            script = detect_cjk_script(text)
+            return _CJK_DEFAULT_FONTS.get(script) or font
+        if has_form_symbol(text):
+            # No CJK to pick a regional face — route to a font that actually
+            # contains the ballot/symbol glyphs (Latin faces don't).
+            return _SYMBOL_FONT or font
     return font
 
 
@@ -170,20 +203,32 @@ def build_run_xml(text: str, style: Optional[Dict]) -> str:
       never reach here as body text.
     """
     style = style or {}
-    font = xml_escape(style.get("font") or "Calibri")
+    base_font = style.get("font") or "Calibri"
+    font = xml_escape(base_font)
     east = xml_escape(
-        resolve_east_asia_font(
-            style.get("font") or "Calibri", text or "", style.get("eastasia")
-        )
+        resolve_east_asia_font(base_font, text or "", style.get("eastasia"))
     )
+    # Word/LibreOffice only draw a char from the eastAsia face if they classify
+    # it as East-Asian; ballot/tick symbols are ambiguous, so a Latin-only ascii
+    # face would still be used and the glyph would drop. When the run carries a
+    # form symbol its Latin font can't render (and no CJK already forced the
+    # substitution), point the ascii/hAnsi/cs faces at the symbol-bearing font
+    # too so the glyph is guaranteed to draw. CJK runs are unaffected.
+    ascii_font = font
+    if (
+        base_font.strip().lower() in _LATIN_ONLY_FONTS
+        and not has_cjk(text or "")
+        and has_form_symbol(text or "")
+    ):
+        ascii_font = east
     size_hp = half_points(style.get("size") or 11)
     bold = bool(style.get("bold"))
     italic = bool(style.get("italic"))
     color_hex = rgb_hex(style.get("color"))
 
     rpr_parts = [
-        f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}"'
-        f' w:eastAsia="{east}" w:cs="{font}"/>',
+        f'<w:rFonts w:ascii="{ascii_font}" w:hAnsi="{ascii_font}"'
+        f' w:eastAsia="{east}" w:cs="{ascii_font}"/>',
         f'<w:sz w:val="{size_hp}"/>',
         f'<w:szCs w:val="{size_hp}"/>',
         f'<w:color w:val="{color_hex}"/>',

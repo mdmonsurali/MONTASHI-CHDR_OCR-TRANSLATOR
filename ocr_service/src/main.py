@@ -49,6 +49,7 @@ from chandra_style import attribute_page
 from picture_recovery import recover_missing_pictures
 from cell_picture_recovery import recover_table_cell_pictures
 from table_reocr import recover_dropped_table_rows
+from checkbox_reocr import recover_dropped_checkboxes
 
 import storage
 
@@ -75,6 +76,14 @@ ATTRIBUTE_STYLES = os.getenv("ATTRIBUTE_STYLES", "false").strip().lower() in {
 # (embedded rasters inside the table exceed its <img> cells). Default on; issues
 # extra model calls only for the affected tables.
 REOCR_DROPPED_ROWS = os.getenv("OCR_REOCR_DROPPED_ROWS", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+# Re-OCR a standalone form block's crop when Chandra transcribed its option
+# labels but dropped the checkboxes (empty boxes lost on the downscaled full
+# page). Default on; issues extra model calls only for blocks that look like
+# they lost a box. Works on scanned pages too (uses only the page raster).
+REOCR_DROPPED_CHECKBOXES = os.getenv(
+    "OCR_REOCR_DROPPED_CHECKBOXES", "true").strip().lower() in {
     "1", "true", "yes", "on",
 }
 
@@ -309,6 +318,13 @@ async def _run_pipeline(in_path: Path, source_bytes: bytes, original_name: str,
                  original_name, doc_id, len(pages_meta), scan_type, batch_size)
 
         pages = await _ocr_pages_concurrently(pages_meta, batch_size)
+
+        # Recover checkboxes Chandra dropped on standalone form blocks
+        # (transcribed the option labels as bare text, no <input>). Re-OCRs just
+        # the block crop where the boxes likely got lost. Independent of
+        # pictures and works on scanned pages, so it runs unconditionally here.
+        if REOCR_DROPPED_CHECKBOXES:
+            await recover_dropped_checkboxes(pages)
 
         # Recover Picture entries the VLM dropped from inside tables. Only
         # runs for native PDFs (image inputs / scans have no embedded raster

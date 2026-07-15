@@ -65,7 +65,7 @@ Guidelines:
 * Tables: Use colspan and rowspan attributes to match table structure.
 * Formatting: Maintain consistent formatting with the image, including spacing, indentation, subscripts/superscripts, and special characters.
 * Images: Include a description of any images in the alt attribute of an <img> tag. Do not fill out the src property. Describe in detail inside the div tag. Also convert charts to high fidelity data, and convert diagrams to mermaid.
-* Forms: Mark checkboxes and radio buttons properly.
+* Forms: Emit EVERY checkbox and radio button as an <input type="checkbox"> (or type="radio") tag, adding the checked attribute only when the box is visibly marked. This includes EMPTY / unchecked boxes — never omit a box because it is blank. Do NOT transcribe a checkbox as its label text alone: an option line like "☐是 ☐否" or "是 否" preceded by boxes must become <input type="checkbox"/>是 <input type="checkbox"/>否, preserving the box for each option.
 * Text: join lines together properly into paragraphs using <p>...</p> tags.  Use <br> tags for line breaks within paragraphs, but only when absolutely necessary to maintain meaning.
 * Chemistry: Use <chem>...</chem> tags for chemical formulas with reactive SMILES.
 * Lists: Preserve indents and proper list markers.
@@ -302,6 +302,17 @@ def _list_group_to_text(html_fragment: str) -> str:
     UNLESS the item text already begins with its own marker (so we never double
     up on the baked-in case). Non-list content in the block is flattened normally."""
     soup = BeautifulSoup(_inline_math_to_dollars(html_fragment), "html.parser")
+    # Convert form checkboxes/radios to a Unicode box glyph BEFORE get_text()
+    # (which strips empty <input> tags, dropping both the box and its state).
+    # A List-Group can hold form options (e.g. "是否打扫: <input/>是 <input/>否"),
+    # so it needs the same conversion the Form/Text path does in
+    # `_html_block_to_text`; without it those checkboxes vanish from the JSON.
+    for inp in soup.find_all("input"):
+        itype = (inp.get("type") or "checkbox").lower().rstrip("/").strip()
+        if itype in ("checkbox", "radio"):
+            inp.replace_with("☑" if inp.has_attr("checked") else "☐")
+        else:
+            inp.replace_with("")
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
